@@ -117,17 +117,24 @@ func (c *Client) AutoLogin(ctx context.Context) (*SessionInfo, bool, error) {
 	return sessionInfo(session), true, nil
 }
 
-// Logout 断开 WS 并清空本地缓存。
-func (c *Client) Logout() {
+// Close 只断开 WS，保留本地缓存（应用退出时用）。
+func (c *Client) Close() {
 	c.mu.Lock()
 	ws := c.ws
 	c.ws = nil
-	c.http = nil
-	c.session = nil
 	c.mu.Unlock()
 	if ws != nil {
 		ws.Stop()
 	}
+}
+
+// Logout 断开 WS 并清空本地缓存。
+func (c *Client) Logout() {
+	c.Close()
+	c.mu.Lock()
+	c.http = nil
+	c.session = nil
+	c.mu.Unlock()
 	c.store.Clear()
 }
 
@@ -144,6 +151,11 @@ func (c *Client) Session() *SessionInfo {
 // Conversations 返回本地会话列表。
 func (c *Client) Conversations() []*Conversation {
 	return c.store.Conversations()
+}
+
+// Conversation 返回单个会话（通知里取对端昵称用）。
+func (c *Client) Conversation(id uint64) *Conversation {
+	return c.store.Conversation(id)
 }
 
 // SearchUsers 搜索用户。

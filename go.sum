@@ -1,3 +1,5 @@
+git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 h1:N3IGoHHp9pb6mj1cbXbuaSXV/UMKwmbKLf53nQmtqMA=
+git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3/go.mod h1:QtOLZGz8olr4qH2vWK0QH0w0O4T9fEIjMuWpKUsH7nc=
 github.com/CycleZero/rym v0.0.0-20261119045807-bc4d7feae133 h1:GYT9SoApK5ISp+pK+4SjV/Grc09Utc19yHvTcX19cts=
 github.com/CycleZero/rym v0.0.0-20261119045807-bc4d7feae133/go.mod h1:D7EjGVK+IZX4fc6olJl1hXAQa1e9NY37AZ+vyfkaH2Q=
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=

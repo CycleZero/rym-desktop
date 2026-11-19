@@ -35,6 +35,7 @@ main.go            Wails 入口
   下一步换 SQLite（`modernc.org/sqlite`，纯 Go）。
 - token 与 store 同文件；下一步接系统 keychain。
 - 没有 outbox 持久化；发送失败由 UI 保留输入，后续补 outbox。
+- 托盘/通知已接：关闭窗口收进托盘；窗口不可见/失焦时发通知。
 - 没有群聊/媒体/撤回/离线推送。
 
 ## 坑
