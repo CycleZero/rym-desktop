@@ -33,7 +33,8 @@ main.go            Wails 入口
 
 - 本地缓存是 SQLite（`modernc.org/sqlite`，纯 Go）：`DataDir()/rym.db`，
   目录 0700 / 库文件 0600；旧版 `store.json` 首次打开时导入并改名 `.imported`。
-- token 与 store 同文件；下一步接系统 keychain。
+- token 走系统凭据库（`client/secret.go`），不可用时退到 `SecretDir()/token`；
+  数据库里**不存** token。
 - 没有 outbox 持久化；发送失败由 UI 保留输入，后续补 outbox。
 - 托盘/通知已接：关闭窗口收进托盘；窗口不可见/失焦时发通知。
 - 没有群聊/媒体/撤回/离线推送。
@@ -64,7 +65,7 @@ main.go            Wails 入口
   测试隔离直接给 `New(storePath)` 传临时路径。
 - `CacheDir()` 必须能整体删除而不影响登录态与消息。
 - `EnsureDir` 只对新建目录生效，**不要**改成顺手 chmod 已有目录：调用方可能传共享目录。
-- `store.json` 含 token：目录 0700、文件 0600，不得放宽。
+- `store.json` 是旧格式，只读不写；兜底 token 文件必须 0600、目录 0700。
 
 ## 本地存储（SQLite）
 
@@ -79,8 +80,15 @@ main.go            Wails 入口
   服务端摘要乱序到达会让客户端“重新发现”已读消息或误判漏消息。
 - 展示字段（`unread_count` / `version` / `pinned` / `muted`）以最新一份摘要为准，含零值。
 - 表结构版本用 `PRAGMA user_version`：升级加增量 SQL + 版本号 +1，不改已发布语句。
-- 库文件必须 0600、目录 0700：库里有 token。SQLite 默认按 umask 建文件，
-  所以 `NewStore` 里先 `Ping` 建文件再 `chmod`，且必须在开 WAL 之前。
+- 库文件必须 0600、目录 0700（库里虽然不再有 token，但仍有全部聊天内容）。
+  SQLite 默认按 umask 建文件，所以 `NewStore` 里先 `Ping` 建文件再 `chmod`，
+  且必须在开 WAL 之前。
+- **token 只在 `tokenStore` 里**：`Store.SetSession` 会抹掉 token 再落库。
+  新增持久化字段时别把凭据塞进 SQLite。
+- 令牌存储是“凭据库优先、0600 文件兜底”：`Set` 成功要删明文兜底；
+  `Delete` 里凭据库不可达不算失败，只有兜底文件的错误必须上报。
+- 测试必须注入内存 `tokenStore`（`newClient(path, &memoryTokenStore{})`），
+  禁止让 `go test` 碰真实凭据库或写 `$HOME`。
 - `SetMaxOpenConns(1)`：**`rows` 没关之前不要再发查询**，否则自己等自己死锁。
   （读出来的行先 `Close`/读完，再做下一件事。）
 

@@ -25,12 +25,18 @@ func (s *Store) Session() *Session {
 	return &session
 }
 
+// SetSession 持久化登录态（用户与服务器地址）。
+//
+// token 不落库：它走 tokenStore（系统凭据库 / 0600 兜底文件）。
+// 库文件权限再严也不该存凭据明文——备份、同步、截图都可能把它带出去。
 func (s *Store) SetSession(session *Session) {
 	if session == nil {
 		_, _ = s.db.Exec(`DELETE FROM settings WHERE key = ?`, sessionKey)
 		return
 	}
-	raw, err := json.Marshal(session)
+	persisted := *session
+	persisted.Token = ""
+	raw, err := json.Marshal(&persisted)
 	if err != nil {
 		return
 	}

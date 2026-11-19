@@ -106,7 +106,7 @@ go mod tidy
 | `DataDir()` 消息数据 | `%LOCALAPPDATA%\rym-desktop` | `~/Library/Application Support/rym-desktop` | `$XDG_DATA_HOME/rym-desktop` 或 `~/.local/share/rym-desktop` | 已用 |
 | `StateDir()` 运行状态 | `%LOCALAPPDATA%\rym-desktop` | `~/Library/Application Support/rym-desktop` | `$XDG_STATE_HOME/rym-desktop` 或 `~/.local/state/rym-desktop` | 预留 |
 | `CacheDir()` 缓存 | `%LOCALAPPDATA%\rym-desktop\cache` | `~/Library/Caches/rym-desktop` | `$XDG_CACHE_HOME/rym-desktop` 或 `~/.cache/rym-desktop` | 已用 |
-| `SecretDir()` 凭据 | `%LOCALAPPDATA%\rym-desktop\secret` | `~/Library/Application Support/rym-desktop/secret` | `~/.local/share/rym-desktop/secret` | 预留 |
+| `SecretDir()` 凭据 | `%LOCALAPPDATA%\rym-desktop\secret` | `~/Library/Application Support/rym-desktop/secret` | `~/.local/share/rym-desktop/secret` | 已用（兜底） |
 
 约定：
 
@@ -117,15 +117,29 @@ go mod tidy
   XDG state 目录，Windows/macOS 与 DataDir 同根（不为了对称硬造子目录）。
 - **ConfigDir**：用户可编辑的小配置。macOS 上与 DataDir 同路径——Apple 没有单独的
   配置文件目录，非 plist 文件都放 Application Support，这是平台事实。
-- **SecretDir**：目标是系统凭据库（Windows Credential Manager / macOS Keychain /
-  Linux Secret Service），文件只是兜底；兜底时先 `EnsureDir(dir, 0o700)`，文件 0600。
+- **SecretDir**：`token` 文件（0600）。只在系统凭据库不可用时才写（见下）。
 - Windows 的 Data/State/Cache/Secret 用 **Local** 而不是 Roaming：消息库会持续增长，
   放 Roaming 会被域漫游同步到服务器（拖慢登录），且网络盘上跑 SQLite 容易损坏。
   只有 Config 用 `%APPDATA%`，保持“小配置可漫游”的 Windows 惯例。
-- Token 目前存在 `rym.db` 的 `settings` 表里，后续接 keychain。
+- Token **不落库**：优先写系统凭据库（Windows Credential Manager / macOS Keychain /
+  Linux Secret Service），不可用时退到 `SecretDir()/token`（0600 原子写）。
+  库里的 `settings.session` 只有用户与服务器地址。
 
 更早期把 store 写在 `~/.config/rym-desktop/`（Linux），这一段不做文件搬迁：
 老环境重新登录一次，旧目录可以手工删除。
+
+## 令牌存储
+
+`client/secret.go` 用 `github.com/zalando/go-keyring`：
+
+- `Set`：写凭据库；成功后删掉兜底明文文件。写失败（无 Secret Service 的
+  SSH/WSL/容器）就退到 `<SecretDir>/token`。
+- `Get`：先凭据库，再兜底文件；两处都没有 = 未登录。
+- `Delete`：登出时两边都清；凭据库不可达不算失败（反正写的时候也没写进去）。
+- 旧版本存在 `rym.db` 里的 token 会在首次 `AutoLogin` 时自动搬到凭据库，
+  并把库里的副本抹掉——升级不用重新登录。
+- 测试必须用内存实现（`newClient(path, &memoryTokenStore{})`），
+  不要往真实凭据库或 `$HOME` 写东西。
 
 ## 本地数据库
 

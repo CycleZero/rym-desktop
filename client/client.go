@@ -15,6 +15,7 @@ import (
 type Client struct {
 	mu      sync.Mutex
 	store   *Store
+	tokens  tokenStore
 	http    *httpClient
 	ws      *WSClient
 	session *Session
@@ -25,6 +26,11 @@ type Client struct {
 
 // New 创建客户端；dbPath 为空时使用平台默认路径。
 func New(dbPath string) (*Client, error) {
+	return newClient(dbPath, newTokenStore())
+}
+
+// newClient 允许测试注入令牌存储，避免 `go test` 往真实凭据库里写东西。
+func newClient(dbPath string, tokens tokenStore) (*Client, error) {
 	if dbPath == "" {
 		path, err := DefaultDBPath()
 		if err != nil {
@@ -36,7 +42,7 @@ func New(dbPath string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("打开本地数据库: %w", err)
 	}
-	return &Client{store: store}, nil
+	return &Client{store: store, tokens: tokens}, nil
 }
 
 // SetEventHandlers 注册 WS 事件/连接状态回调（Wails 服务在这里桥接事件）。
@@ -80,6 +86,8 @@ func (c *Client) Login(ctx context.Context, serverURL string, wsPort int, userna
 	c.session = session
 	c.mu.Unlock()
 	c.store.SetSession(session)
+	// 令牌写系统凭据库；写失败只影响“下次自动登录”，不阻断本次登录。
+	_ = c.tokens.Set(session.Token)
 
 	if _, err := c.fetchConversations(ctx); err != nil {
 		// 登录成功但列表失败：保留登录态，返回错误让 UI 重试。
@@ -93,19 +101,33 @@ func (c *Client) Login(ctx context.Context, serverURL string, wsPort int, userna
 // AutoLogin 用本地保存的 token 恢复登录；token 失效时清空。
 func (c *Client) AutoLogin(ctx context.Context) (*SessionInfo, bool, error) {
 	session := c.store.Session()
-	if session == nil || session.Token == "" {
+	if session == nil {
 		return nil, false, nil
 	}
+
+	token, err := c.tokens.Get()
+	if err != nil && session.Token != "" {
+		// 升级路径：旧版本把 token 存在库里。搬到凭据库后把库里的副本抹掉，
+		// 成功后 store.SetSession 不会再写 token。
+		token = session.Token
+		_ = c.tokens.Set(token)
+		c.store.SetSession(session)
+	}
+	if token == "" {
+		return nil, false, nil
+	}
+	session.Token = token
 
 	hc, err := newHTTPClient(session.ServerURL)
 	if err != nil {
 		return nil, false, err
 	}
-	hc.setToken(session.Token)
+	hc.setToken(token)
 	user, err := hc.me(ctx)
 	if err != nil {
 		if errors.Is(err, ErrUnauthorized) {
 			c.store.Clear()
+			_ = c.tokens.Delete()
 			return nil, false, nil
 		}
 		return nil, false, err
@@ -152,6 +174,7 @@ func (c *Client) Logout() {
 	c.session = nil
 	c.mu.Unlock()
 	c.store.Clear()
+	_ = c.tokens.Delete()
 }
 
 // Session 返回当前登录信息（不含 token）。

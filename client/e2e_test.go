@@ -9,6 +9,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,11 +38,14 @@ func TestE2E(t *testing.T) {
 	bobName := fmt.Sprintf("e2ebob%d", suffix)
 	const password = "password123"
 
-	alice, err := New(filepath.Join(t.TempDir(), "alice.db"))
+	// 用内存令牌存储：E2E 不能往真实凭据库或 HOME 里写东西。
+	alicePath := filepath.Join(t.TempDir(), "alice.db")
+	aliceTokens := &memoryTokenStore{}
+	alice, err := newClient(alicePath, aliceTokens)
 	if err != nil {
 		t.Fatalf("创建 alice 客户端: %v", err)
 	}
-	bob, err := New(filepath.Join(t.TempDir(), "bob.db"))
+	bob, err := newClient(filepath.Join(t.TempDir(), "bob.db"), &memoryTokenStore{})
 	if err != nil {
 		t.Fatalf("创建 bob 客户端: %v", err)
 	}
@@ -137,7 +141,29 @@ func TestE2E(t *testing.T) {
 	if len(convs) == 0 || convs[0].Peer == nil || convs[0].Peer.ID != bobUser.ID {
 		t.Fatalf("会话列表 peer 不对: %+v", convs)
 	}
-	_ = aliceUser
+
+	// 模拟重启：同一个库 + 同一个令牌存储，应能用 token 自动登录。
+	// 同时验证 token 没有落库（库里的 session 不含 token，令牌只在 memoryTokenStore 里）。
+	alice.Close()
+	restarted, err := newClient(alicePath, aliceTokens)
+	if err != nil {
+		t.Fatalf("重启 alice 客户端: %v", err)
+	}
+	defer restarted.Close()
+	info, ok, err := restarted.AutoLogin(ctx)
+	if err != nil {
+		t.Fatalf("自动登录: %v", err)
+	}
+	if !ok || info == nil || info.User.ID != aliceUser.ID {
+		t.Fatalf("自动登录失败: ok=%v info=%+v", ok, info)
+	}
+	if len(restarted.Conversations()) == 0 {
+		t.Fatalf("自动登录后本地会话未恢复")
+	}
+	restarted.Logout()
+	if _, err := aliceTokens.Get(); !errors.Is(err, errNoToken) {
+		t.Fatalf("登出后应清除令牌，实际 %v", err)
+	}
 }
 
 func waitConnected(t *testing.T, states <-chan ConnectionState) {

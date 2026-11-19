@@ -15,6 +15,7 @@ func TestStorePersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("NewStore: %v", err)
 	}
 	store.SetSession(&Session{User: User{ID: 1, Username: "alice"}, Token: "t", ServerURL: "http://x", WSPort: 8001})
+	// token 走凭据库，不该落库。
 	store.AddMessage(&Message{MsgID: "m1", ConversationID: 7, Seq: 1, SenderID: 2, Body: `{"text":"hi"}`})
 	store.AddMessage(&Message{MsgID: "m2", ConversationID: 7, Seq: 2, SenderID: 1, Body: `{"text":"yo"}`})
 	if err := store.Close(); err != nil {
@@ -28,8 +29,11 @@ func TestStorePersistsAcrossReopen(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	session := store.Session()
-	if session == nil || session.Token != "t" || session.User.Username != "alice" {
+	if session == nil || session.User.Username != "alice" || session.ServerURL != "http://x" {
 		t.Fatalf("登录态未持久化：%+v", session)
+	}
+	if session.Token != "" {
+		t.Fatalf("token 不应落库：%q", session.Token)
 	}
 	if got := len(store.Messages(7)); got != 2 {
 		t.Fatalf("消息应持久化 2 条，实际 %d", got)
@@ -147,6 +151,23 @@ func TestStoreUpsertWatermarksMonotonic(t *testing.T) {
 	}
 	if conv.LastMessage == nil || conv.LastMessage.MsgID != "m5" {
 		t.Fatalf("last_message 被清空：%+v", conv.LastMessage)
+	}
+}
+
+// 库文件权限再严，也不该存凭据明文。
+func TestStoreDoesNotPersistToken(t *testing.T) {
+	store := newTestStore(t)
+	store.SetSession(&Session{User: User{ID: 1}, Token: "secret-token"})
+
+	session := store.Session()
+	if session == nil {
+		t.Fatalf("登录态未持久化")
+	}
+	if session.Token != "" {
+		t.Fatalf("token 落库了：%q", session.Token)
+	}
+	if session.User.ID != 1 {
+		t.Fatalf("用户信息丢失：%+v", session.User)
 	}
 }
 
