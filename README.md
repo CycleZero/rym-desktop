@@ -3,6 +3,8 @@
 rym 的桌面客户端：**Wails v3 + Go + React/TypeScript**。
 
 - 网络、WS 重连、本地缓存都在 Go 侧（`client/`）
+- HTTP 调用使用服务端 proto 生成的 `UserServiceHTTPClient` / `ImServiceHTTPClient`，
+  只保留一层“信封 + 鉴权 + content-type”适配
 - 前端只做 UI，通过 Wails bindings/events 与 Go 通信
 - 服务端契约见 [../rym/docs/client-protocol.md](../rym/docs/client-protocol.md)
 
@@ -20,7 +22,7 @@ rym 的桌面客户端：**Wails v3 + Go + React/TypeScript**。
 ## 目录
 
 ```
-client/              Go 客户端核心（HTTP / WS / JSON Store）
+client/              Go 客户端核心（生成 HTTP client / WS / JSON Store）
 chatservice.go       Wails 服务：把 client 包装成前端绑定
 main.go              Wails 应用入口
 frontend/            React + TypeScript + Vite
@@ -68,6 +70,22 @@ server:
 - 服务端地址：`http://<host>:8000`
 - WS 端口：`8001`
 - 用户名 / 密码
+
+## HTTP 客户端代码生成
+
+`client/http.go` 不手写端点，使用服务端 `api/im/v1`、`api/user/v1` 生成的客户端：
+
+- `github.com/CycleZero/rym` 作为 module 依赖（只 import `api/`）；
+- 生成客户端默认 `application/protojson`，这里用 `jsonOpts` 覆盖为 `application/json`；
+- 服务端统一信封由 `decodeEnvelope` 拆 `data`，错误由 `decodeAPIError` 映射；
+- 鉴权由 `authTransport` 统一加 `Authorization`。
+
+服务端 API 变更后：
+
+```bash
+go get github.com/CycleZero/rym@<commit>
+go mod tidy
+```
 
 ## 本地缓存
 

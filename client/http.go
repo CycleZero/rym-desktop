@@ -1,7 +1,6 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,9 +8,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	v1im "github.com/CycleZero/rym/api/im/v1"
+	v1user "github.com/CycleZero/rym/api/user/v1"
+	khttp "github.com/go-kratos/kratos/v3/transport/http"
 )
 
 // APIError 是服务端统一信封里的业务错误。
@@ -31,205 +34,247 @@ func (e *APIError) Error() string {
 // ErrUnauthorized 便于前端判断 token 失效。
 var ErrUnauthorized = errors.New("登录已失效")
 
-type envelope struct {
-	Code    int             `json:"code"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data"`
+// jsonOpts 覆盖生成客户端默认的 application/protojson：
+// 本服务端使用 application/json + 统一信封。
+var jsonOpts = []khttp.CallOption{
+	khttp.ContentType("application/json"),
+	khttp.Accept("application/json"),
 }
 
-type httpClient struct {
-	base  string
+// authTransport 给所有请求附加 Bearer token。
+type authTransport struct {
+	base  http.RoundTripper
+	mu    sync.RWMutex
 	token string
-	hc    *http.Client
 }
 
-func newHTTPClient(base string) *httpClient {
+func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.RLock()
+	token := t.token
+	t.mu.RUnlock()
+	if token != "" {
+		req = req.Clone(req.Context())
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return t.base.RoundTrip(req)
+}
+
+func (t *authTransport) setToken(token string) {
+	t.mu.Lock()
+	t.token = token
+	t.mu.Unlock()
+}
+
+// httpClient 使用 proto 生成的 HTTP 客户端，只做信封/鉴权适配与 proto -> DTO 映射。
+type httpClient struct {
+	tr   *authTransport
+	user v1user.UserServiceHTTPClient
+	im   v1im.ImServiceHTTPClient
+}
+
+func newHTTPClient(base string) (*httpClient, error) {
+	tr := &authTransport{base: &http.Transport{Proxy: nil}}
+	cc, err := khttp.NewClient(context.Background(),
+		khttp.WithEndpoint(normalizeBase(base)),
+		khttp.WithTimeout(15*time.Second),
+		khttp.WithTransport(tr),
+		khttp.WithResponseDecoder(decodeEnvelope),
+		khttp.WithErrorDecoder(decodeAPIError),
+	)
+	if err != nil {
+		return nil, err
+	}
 	return &httpClient{
-		base: normalizeBase(base),
-		hc: &http.Client{
-			Timeout:   15 * time.Second,
-			Transport: &http.Transport{Proxy: nil},
-		},
+		tr:   tr,
+		user: v1user.NewUserServiceHTTPClient(cc),
+		im:   v1im.NewImServiceHTTPClient(cc),
+	}, nil
+}
+
+func (c *httpClient) setToken(token string) {
+	if c != nil && c.tr != nil {
+		c.tr.setToken(token)
 	}
 }
 
-func normalizeBase(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		raw = "http://127.0.0.1:8000"
+// decodeEnvelope 拆开 {code,message,data,trace_id}，把 data 交给生成客户端。
+func decodeEnvelope(_ context.Context, res *http.Response, out any) error {
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return err
 	}
-	if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
-		raw = "http://" + raw
+	var env struct {
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
 	}
-	return strings.TrimRight(raw, "/")
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return err
+	}
+	if env.Code != 0 {
+		return &APIError{Status: res.StatusCode, Code: env.Code, Message: env.Message}
+	}
+	if out == nil || len(env.Data) == 0 {
+		return nil
+	}
+	return json.Unmarshal(env.Data, out)
 }
 
-func (c *httpClient) do(ctx context.Context, method, path string, body any, out any) error {
-	var reader io.Reader
-	if body != nil {
-		raw, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		reader = bytes.NewReader(raw)
+func decodeAPIError(_ context.Context, res *http.Response) error {
+	// kratos 对每个响应都会调用 errorDecoder（包括 2xx），
+	// 2xx 必须直接返回 nil，且不能读 body，否则 responseDecoder 拿不到内容。
+	if res.StatusCode >= http.StatusOK && res.StatusCode <= 299 {
+		return nil
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
-	if err != nil {
-		return err
+	raw, _ := io.ReadAll(res.Body)
+	if res.StatusCode == http.StatusUnauthorized {
+		return ErrUnauthorized
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	var env struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
 	}
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-
-	var env envelope
-	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &env)
-	}
-	if resp.StatusCode != http.StatusOK || env.Code != 0 {
-		if resp.StatusCode == http.StatusUnauthorized {
-			return ErrUnauthorized
-		}
-		msg := env.Message
-		if msg == "" {
-			msg = resp.Status
-		}
-		return &APIError{Status: resp.StatusCode, Code: env.Code, Message: msg}
-	}
-	if out != nil && len(env.Data) > 0 {
-		if err := json.Unmarshal(env.Data, out); err != nil {
-			return err
-		}
-	}
-	return nil
+	_ = json.Unmarshal(raw, &env)
+	return &APIError{Status: res.StatusCode, Code: env.Code, Message: env.Message}
 }
 
 type loginData struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresAt   int64  `json:"expires_at"`
-	User        User   `json:"user"`
+	AccessToken string
+	TokenType   string
+	ExpiresAt   int64
+	User        User
 }
 
 func (c *httpClient) login(ctx context.Context, username, password string) (*loginData, error) {
-	var out loginData
-	err := c.do(ctx, http.MethodPost, "/v1/users/login", map[string]any{
-		"username": username,
-		"password": password,
-	}, &out)
-	return &out, err
+	resp, err := c.user.Login(ctx, &v1user.LoginRequest{
+		Username: username,
+		Password: password,
+	}, jsonOpts...)
+	if err != nil {
+		return nil, err
+	}
+	user := toUser(resp.GetUser())
+	if user == nil {
+		user = &User{}
+	}
+	return &loginData{
+		AccessToken: resp.GetAccessToken(),
+		TokenType:   resp.GetTokenType(),
+		ExpiresAt:   resp.GetExpiresAt(),
+		User:        *user,
+	}, nil
 }
 
 func (c *httpClient) register(ctx context.Context, username, password, nickname string) (*User, error) {
-	var out User
-	err := c.do(ctx, http.MethodPost, "/v1/users/register", map[string]any{
-		"username": username,
-		"password": password,
-		"nickname": nickname,
-	}, &out)
-	return &out, err
+	resp, err := c.user.Register(ctx, &v1user.RegisterRequest{
+		Username: username,
+		Password: password,
+		Nickname: nickname,
+	}, jsonOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return toUser(resp), nil
 }
 
 func (c *httpClient) me(ctx context.Context) (*User, error) {
-	var out User
-	err := c.do(ctx, http.MethodGet, "/v1/users/me", nil, &out)
-	return &out, err
+	resp, err := c.user.GetMe(ctx, &v1user.GetMeRequest{}, jsonOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return toUser(resp), nil
 }
 
 func (c *httpClient) searchUsers(ctx context.Context, keyword string, limit int) ([]*User, error) {
-	q := url.Values{}
-	q.Set("keyword", keyword)
-	if limit > 0 {
-		q.Set("limit", strconv.Itoa(limit))
+	resp, err := c.user.SearchUsers(ctx, &v1user.SearchUsersRequest{
+		Keyword: keyword,
+		Limit:   int32(limit),
+	}, jsonOpts...)
+	if err != nil {
+		return nil, err
 	}
-	var out struct {
-		List []*User `json:"list"`
-	}
-	err := c.do(ctx, http.MethodGet, "/v1/users/search?"+q.Encode(), nil, &out)
-	return out.List, err
+	return toUsers(resp.GetList()), nil
 }
 
 func (c *httpClient) batchUsers(ctx context.Context, ids []uint64) ([]*User, error) {
-	var out struct {
-		List []*User `json:"list"`
+	resp, err := c.user.BatchGetUsers(ctx, &v1user.BatchGetUsersRequest{Ids: ids}, jsonOpts...)
+	if err != nil {
+		return nil, err
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/users/batch", map[string]any{"ids": ids}, &out)
-	return out.List, err
+	return toUsers(resp.GetList()), nil
 }
 
 func (c *httpClient) listConversations(ctx context.Context, limit int) ([]*Conversation, error) {
-	path := "/v1/im/conversations"
-	if limit > 0 {
-		path += "?limit=" + strconv.Itoa(limit)
+	resp, err := c.im.ListConversations(ctx, &v1im.ListConversationsRequest{Limit: int32(limit)}, jsonOpts...)
+	if err != nil {
+		return nil, err
 	}
-	var out struct {
-		List []*Conversation `json:"list"`
-	}
-	err := c.do(ctx, http.MethodGet, path, nil, &out)
-	return out.List, err
+	return toConversations(resp.GetList()), nil
 }
 
 func (c *httpClient) openConversation(ctx context.Context, toUserID uint64) (*Conversation, error) {
-	var out Conversation
-	err := c.do(ctx, http.MethodPost, "/v1/im/conversations", map[string]any{"to_user_id": toUserID}, &out)
-	return &out, err
+	resp, err := c.im.OpenSingleConversation(ctx, &v1im.OpenSingleConversationRequest{
+		ToUserId: toUserID,
+	}, jsonOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return toConversation(resp), nil
 }
 
 type pullResult struct {
-	List    []*Message `json:"list"`
-	MaxSeq  int64      `json:"max_seq"`
-	HasMore bool       `json:"has_more"`
+	List    []*Message
+	MaxSeq  int64
+	HasMore bool
 }
 
 func (c *httpClient) pullMessages(ctx context.Context, conversationID uint64, beforeSeq, afterSeq int64, limit int) (*pullResult, error) {
-	q := url.Values{}
-	q.Set("conversation_id", strconv.FormatUint(conversationID, 10))
-	if beforeSeq > 0 {
-		q.Set("before_seq", strconv.FormatInt(beforeSeq, 10))
+	resp, err := c.im.PullMessages(ctx, &v1im.PullMessagesRequest{
+		ConversationId: conversationID,
+		BeforeSeq:      beforeSeq,
+		AfterSeq:       afterSeq,
+		Limit:          int32(limit),
+	}, jsonOpts...)
+	if err != nil {
+		return nil, err
 	}
-	if afterSeq > 0 {
-		q.Set("after_seq", strconv.FormatInt(afterSeq, 10))
-	}
-	if limit > 0 {
-		q.Set("limit", strconv.Itoa(limit))
-	}
-	var out pullResult
-	err := c.do(ctx, http.MethodGet, "/v1/im/messages?"+q.Encode(), nil, &out)
-	return &out, err
+	return &pullResult{
+		List:    toMessages(resp.GetList()),
+		MaxSeq:  resp.GetMaxSeq(),
+		HasMore: resp.GetHasMore(),
+	}, nil
 }
 
 type sendResult struct {
-	Message    *Message `json:"message"`
-	Duplicated bool     `json:"duplicated"`
-	LastSeq    int64    `json:"last_seq"`
+	Message    *Message
+	Duplicated bool
+	LastSeq    int64
 }
 
 func (c *httpClient) sendMessage(ctx context.Context, conversationID, toUserID uint64, clientMsgID, body string) (*sendResult, error) {
-	payload := map[string]any{
-		"client_msg_id": clientMsgID,
-		"type":          1,
-		"body":          body,
+	resp, err := c.im.SendMessage(ctx, &v1im.SendMessageRequest{
+		ConversationId: conversationID,
+		ToUserId:       toUserID,
+		ClientMsgId:    clientMsgID,
+		Type:           v1im.MessageType_MESSAGE_TYPE_TEXT,
+		Body:           body,
+	}, jsonOpts...)
+	if err != nil {
+		return nil, err
 	}
-	if conversationID > 0 {
-		payload["conversation_id"] = conversationID
-	} else {
-		payload["to_user_id"] = toUserID
-	}
-	var out sendResult
-	err := c.do(ctx, http.MethodPost, "/v1/im/messages", payload, &out)
-	return &out, err
+	return &sendResult{
+		Message:    toMessage(resp.GetMessage()),
+		Duplicated: resp.GetDuplicated(),
+		LastSeq:    resp.GetLastSeq(),
+	}, nil
 }
 
 func (c *httpClient) markRead(ctx context.Context, conversationID uint64, readSeq int64) error {
-	return c.do(ctx, http.MethodPost,
-		fmt.Sprintf("/v1/im/conversations/%d/read", conversationID),
-		map[string]any{"read_seq": readSeq}, nil)
+	_, err := c.im.MarkRead(ctx, &v1im.MarkReadRequest{
+		ConversationId: conversationID,
+		ReadSeq:        readSeq,
+	}, jsonOpts...)
+	return err
 }
 
 func textBody(text string) string {
@@ -253,4 +298,85 @@ func wsURL(serverURL string, port int) string {
 		port = 8001
 	}
 	return fmt.Sprintf("%s://%s:%d/v1/im/ws", scheme, host, port)
+}
+
+func normalizeBase(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = "http://127.0.0.1:8000"
+	}
+	if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
+		raw = "http://" + raw
+	}
+	return strings.TrimRight(raw, "/")
+}
+
+func toUser(u *v1user.User) *User {
+	if u == nil {
+		return nil
+	}
+	return &User{ID: u.GetId(), Username: u.GetUsername(), Nickname: u.GetNickname(), Status: u.GetStatus()}
+}
+
+func toUsers(list []*v1user.User) []*User {
+	out := make([]*User, 0, len(list))
+	for _, u := range list {
+		out = append(out, toUser(u))
+	}
+	return out
+}
+
+func toMessage(m *v1im.Message) *Message {
+	if m == nil {
+		return nil
+	}
+	return &Message{
+		MsgID:          m.GetMsgId(),
+		ConversationID: m.GetConversationId(),
+		Seq:            m.GetSeq(),
+		SenderID:       m.GetSenderId(),
+		ClientMsgID:    m.GetClientMsgId(),
+		Type:           int32(m.GetType()),
+		Body:           m.GetBody(),
+		Status:         m.GetStatus(),
+		ReplyTo:        m.GetReplyTo(),
+		Version:        m.GetVersion(),
+		CreatedAt:      m.GetCreatedAt(),
+	}
+}
+
+func toMessages(list []*v1im.Message) []*Message {
+	out := make([]*Message, 0, len(list))
+	for _, m := range list {
+		out = append(out, toMessage(m))
+	}
+	return out
+}
+
+func toConversation(c *v1im.Conversation) *Conversation {
+	if c == nil {
+		return nil
+	}
+	return &Conversation{
+		ID:          c.GetId(),
+		Type:        int32(c.GetType()),
+		LastSeq:     c.GetLastSeq(),
+		ReadSeq:     c.GetReadSeq(),
+		Unread:      c.GetUnreadCount(),
+		Version:     c.GetVersion(),
+		PeerReadSeq: c.GetPeerReadSeq(),
+		PeerID:      c.GetPeerId(),
+		LastMessage: toMessage(c.GetLastMessage()),
+		Pinned:      c.GetPinned(),
+		Muted:       c.GetMuted(),
+		JoinedAt:    c.GetJoinedAt(),
+	}
+}
+
+func toConversations(list []*v1im.Conversation) []*Conversation {
+	out := make([]*Conversation, 0, len(list))
+	for _, c := range list {
+		out = append(out, toConversation(c))
+	}
+	return out
 }

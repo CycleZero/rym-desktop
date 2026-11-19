@@ -40,18 +40,24 @@ func (c *Client) SetEventHandlers(onEvent func(Event), onState func(ConnectionSt
 
 // Register 注册账号（不自动登录）。
 func (c *Client) Register(ctx context.Context, serverURL, username, password, nickname string) (*User, error) {
-	hc := newHTTPClient(serverURL)
+	hc, err := newHTTPClient(serverURL)
+	if err != nil {
+		return nil, err
+	}
 	return hc.register(ctx, username, password, nickname)
 }
 
 // Login 登录并拉会话列表、建立 WS。
 func (c *Client) Login(ctx context.Context, serverURL string, wsPort int, username, password string) (*SessionInfo, error) {
-	hc := newHTTPClient(serverURL)
+	hc, err := newHTTPClient(serverURL)
+	if err != nil {
+		return nil, err
+	}
 	data, err := hc.login(ctx, username, password)
 	if err != nil {
 		return nil, err
 	}
-	hc.token = data.AccessToken
+	hc.setToken(data.AccessToken)
 
 	session := &Session{
 		User:      data.User,
@@ -82,8 +88,11 @@ func (c *Client) AutoLogin(ctx context.Context) (*SessionInfo, bool, error) {
 		return nil, false, nil
 	}
 
-	hc := newHTTPClient(session.ServerURL)
-	hc.token = session.Token
+	hc, err := newHTTPClient(session.ServerURL)
+	if err != nil {
+		return nil, false, err
+	}
+	hc.setToken(session.Token)
 	user, err := hc.me(ctx)
 	if err != nil {
 		if errors.Is(err, ErrUnauthorized) {

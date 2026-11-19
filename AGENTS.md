@@ -23,7 +23,10 @@ main.go            Wails 入口
 
 - 前端不接触 token；token 只在 Go 侧。
 - WS 用 `Authorization: Bearer`，桌面端不需要 ticket。
-- 不 import 服务端 module；只按 `docs/client-protocol.md` 的 JSON 契约工作。
+- Go 核心可以使用 `github.com/CycleZero/rym/api/...` 生成的 HTTP client；
+  只 import 服务端的 `api/` 包，不 import `app/`、`pkg/` 业务实现。
+- 生成客户端默认 `application/protojson` 且假设裸响应；必须通过
+  `client/http.go` 的 `jsonOpts` / `decodeEnvelope` / `decodeAPIError` 适配。
 - 不在 client 里引入 Wails 依赖（保证 `go test ./client` 可独立跑）。
 
 ## 当前 MVP 与代价
@@ -33,6 +36,14 @@ main.go            Wails 入口
 - token 与 store 同文件；下一步接系统 keychain。
 - 没有 outbox 持久化；发送失败由 UI 保留输入，后续补 outbox。
 - 没有群聊/媒体/撤回/离线推送。
+
+## 坑
+
+- Kratos 生成客户端用 protoreflect 的 JSON name 替换 path 变量。
+  proto 的 path 字段如果是 snake_case（如 `conversation_id`），必须显式
+  `[json_name = "conversation_id"]`，否则会拼出 `/conversations//read`。
+- `khttp` 的 errorDecoder 对 2xx 也会调用；2xx 必须直接返回 nil 且不能读 body，
+  否则 responseDecoder 拿不到响应体。
 
 ## 构建
 
