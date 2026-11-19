@@ -25,7 +25,7 @@ rym 的桌面客户端：**Wails v3 + Go + React/TypeScript**。
 ## 目录
 
 ```
-client/              Go 客户端核心（生成 HTTP client / WS / JSON Store）
+client/              Go 客户端核心（生成 HTTP client / WS / SQLite Store）
 chatservice.go       Wails 服务：把 client 包装成前端绑定
 main.go              Wails 应用入口
 frontend/            React + TypeScript + Vite
@@ -110,8 +110,8 @@ go mod tidy
 
 约定：
 
-- **DataDir**：`store.json`（session、会话、消息），原子写入，目录 0700 / 文件 0600；
-  下一步换成 SQLite，仍放这里。
+- **DataDir**：`rym.db`（SQLite：登录态、会话摘要、消息），目录 0700 / 库文件 0600。
+  早期版本的 `store.json` 会在首次打开时自动导入并改名为 `store.json.imported`。
 - **CacheDir**：WebView 浏览器数据等，整体删掉只丢缓存，不影响登录态和消息。
 - **StateDir**：窗口位置、日志这类“该持久但不该备份”的东西。只有 Linux 有专门的
   XDG state 目录，Windows/macOS 与 DataDir 同根（不为了对称硬造子目录）。
@@ -122,10 +122,22 @@ go mod tidy
 - Windows 的 Data/State/Cache/Secret 用 **Local** 而不是 Roaming：消息库会持续增长，
   放 Roaming 会被域漫游同步到服务器（拖慢登录），且网络盘上跑 SQLite 容易损坏。
   只有 Config 用 `%APPDATA%`，保持“小配置可漫游”的 Windows 惯例。
-- Token 目前与 `store.json` 同文件，后续接 keychain。
+- Token 目前存在 `rym.db` 的 `settings` 表里，后续接 keychain。
 
-早期版本把 store 写在 `~/.config/rym-desktop/`，不做自动迁移：老环境重新登录一次，
-旧目录可以手工删除。
+更早期把 store 写在 `~/.config/rym-desktop/`（Linux），这一段不做文件搬迁：
+老环境重新登录一次，旧目录可以手工删除。
+
+## 本地数据库
+
+`client/db.go` 用 `modernc.org/sqlite`（纯 Go，无 cgo）打开 `DataDir()/rym.db`：
+
+- `PRAGMA journal_mode=WAL` + `synchronous=NORMAL`：进程崩溃不丢已提交事务，
+  掉电可能丢最后几个事务——缓存可以从服务端按 `after_seq` 补洞，可接受。
+- `SetMaxOpenConns(1)`：SQLite 单写者，桌面端量级下串行化最简单，不会出现
+  `database is locked`。代价是慢查询会挡住其它访问。
+- 表结构版本用 `PRAGMA user_version`；升级时加增量 SQL，不改已发布的建表语句。
+- 消息幂等靠唯一索引 `(conversation_id, msg_id)`；顺序靠主键 `(conversation_id, seq)`。
+- 水位（`last_seq` / `read_seq` / `peer_read_seq`）只增不减，服务端摘要乱序到达也不会回退。
 
 ## 测试
 

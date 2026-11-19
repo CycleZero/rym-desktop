@@ -162,37 +162,42 @@ func TestCacheDir(t *testing.T) {
 	}
 }
 
-func TestDefaultStorePath(t *testing.T) {
-	path, err := DefaultStorePath()
+func TestDefaultDBPath(t *testing.T) {
+	path, err := DefaultDBPath()
 	if err != nil {
-		t.Fatalf("DefaultStorePath: %v", err)
+		t.Fatalf("DefaultDBPath: %v", err)
 	}
 	dir, err := DataDir()
 	if err != nil {
 		t.Fatalf("DataDir: %v", err)
 	}
-	if want := filepath.Join(dir, "store.json"); path != want {
-		t.Fatalf("DefaultStorePath = %q，期望 %q", path, want)
+	if want := filepath.Join(dir, "rym.db"); path != want {
+		t.Fatalf("DefaultDBPath = %q，期望 %q", path, want)
 	}
 }
 
-// store.json 里有 token：目录必须 0700、文件必须 0600。
+// 数据库里有 token：目录必须 0700、库文件必须 0600
+// （SQLite 默认按 umask 建文件，通常 0644，必须显式收紧）。
 func TestStorePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows 不使用 POSIX 权限位")
 	}
 	dir := filepath.Join(t.TempDir(), "data")
-	path := filepath.Join(dir, "store.json")
+	path := filepath.Join(dir, "rym.db")
 
-	s := NewStore(path)
+	s, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer func() { _ = s.Close() }()
 	s.SetSession(&Session{Token: "secret"})
 
 	fileInfo, err := os.Stat(path)
 	if err != nil {
-		t.Fatalf("stat store.json: %v", err)
+		t.Fatalf("stat rym.db: %v", err)
 	}
 	if perm := fileInfo.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("store.json 权限 = %o，期望 600", perm)
+		t.Fatalf("rym.db 权限 = %o，期望 600", perm)
 	}
 	dirInfo, err := os.Stat(dir)
 	if err != nil {

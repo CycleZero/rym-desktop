@@ -18,8 +18,18 @@ func TestTextBodyAndWSURL(t *testing.T) {
 	}
 }
 
+func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	store, err := NewStore(filepath.Join(t.TempDir(), "rym.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
 func TestStoreAddDedupeAndRead(t *testing.T) {
-	store := NewStore(filepath.Join(t.TempDir(), "store.json"))
+	store := newTestStore(t)
 	msg := &Message{MsgID: "m1", ConversationID: 7, Seq: 1, SenderID: 2, Body: `{"text":"hi"}`}
 	store.AddMessage(msg)
 	store.AddMessage(msg) // 去重

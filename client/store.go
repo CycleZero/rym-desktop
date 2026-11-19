@@ -1,132 +1,82 @@
 package client
 
 import (
+	"database/sql"
 	"encoding/json"
-	"errors"
-	"os"
-	"path/filepath"
 	"sort"
-	"sync"
 )
 
-// Store 是本地会话/消息缓存。
-//
-// MVP 用单个 JSON 文件（原子替换）；下一步换 SQLite 时只替换本文件。
-type Store struct {
-	mu   sync.Mutex
-	path string
-	data StoreData
-}
+const sessionKey = "session"
 
-// NewStore 打开（或创建）本地缓存。
-func NewStore(path string) *Store {
-	s := &Store{path: path}
-	s.data = StoreData{
-		Conversations: map[uint64]*Conversation{},
-		Messages:      map[uint64][]*Message{},
-	}
-	_ = s.load()
-	return s
-}
-
-// DefaultStorePath 返回数据目录下的 store.json。
-//
-// 注意：早期版本写在 os.UserConfigDir()（Linux 是 ~/.config）下，
-// 现在统一到 DataDir()；不做自动迁移——项目还没有真实用户，
-// 多一段搬迁代码只会在两处路径之间留下歧义。代价是老环境需重新登录一次。
-func DefaultStorePath() (string, error) {
-	dir, err := DataDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "store.json"), nil
-}
-
-func (s *Store) load() error {
-	raw, err := os.ReadFile(s.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	var data StoreData
-	if err := json.Unmarshal(raw, &data); err != nil {
-		return err
-	}
-	if data.Conversations == nil {
-		data.Conversations = map[uint64]*Conversation{}
-	}
-	if data.Messages == nil {
-		data.Messages = map[uint64][]*Message{}
-	}
-	s.data = data
-	return nil
-}
-
-// Save 原子写入磁盘。
-func (s *Store) Save() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.saveLocked()
-}
-
-func (s *Store) saveLocked() error {
-	if err := EnsureDir(filepath.Dir(s.path), 0o700); err != nil {
-		return err
-	}
-	raw, err := json.MarshalIndent(s.data, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
-}
+// conversationColumns 只写一次，保证 SELECT 与 scanConversation 的顺序不会漂移。
+const conversationColumns = `id, type, last_seq, read_seq, unread_count, version,
+	peer_read_seq, peer_id, peer_json, last_msg_seq, last_msg_json, pinned, muted, joined_at`
 
 // Session 返回当前登录态副本。
 func (s *Store) Session() *Session {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.data.Session == nil {
+	var raw string
+	if err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, sessionKey).Scan(&raw); err != nil {
+		return nil // 没有登录态或读失败：都当作未登录
+	}
+	var session Session
+	if err := json.Unmarshal([]byte(raw), &session); err != nil {
 		return nil
 	}
-	cp := *s.data.Session
-	return &cp
+	return &session
 }
 
 func (s *Store) SetSession(session *Session) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if session == nil {
-		s.data.Session = nil
-	} else {
-		cp := *session
-		s.data.Session = &cp
+		_, _ = s.db.Exec(`DELETE FROM settings WHERE key = ?`, sessionKey)
+		return
 	}
-	_ = s.saveLocked()
+	raw, err := json.Marshal(session)
+	if err != nil {
+		return
+	}
+	_, _ = s.db.Exec(`INSERT INTO settings (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, sessionKey, string(raw))
 }
 
+// Clear 清空登录态与所有缓存（登出）。
 func (s *Store) Clear() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.data = StoreData{
-		Conversations: map[uint64]*Conversation{},
-		Messages:      map[uint64][]*Message{},
+	tx, err := s.db.Begin()
+	if err != nil {
+		return
 	}
-	_ = s.saveLocked()
+	defer func() { _ = tx.Rollback() }()
+	for _, stmt := range []string{
+		`DELETE FROM settings`,
+		`DELETE FROM conversations`,
+		`DELETE FROM messages`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return
+		}
+	}
+	_ = tx.Commit()
 }
 
 // Conversations 返回按最后消息时间倒序的会话副本。
 func (s *Store) Conversations() []*Conversation {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]*Conversation, 0, len(s.data.Conversations))
-	for _, c := range s.data.Conversations {
-		out = append(out, cloneConversation(c))
+	rows, err := s.db.Query(`SELECT ` + conversationColumns + ` FROM conversations`)
+	if err != nil {
+		return []*Conversation{}
 	}
+	defer rows.Close()
+
+	out := make([]*Conversation, 0, 16)
+	for rows.Next() {
+		conv, err := scanConversation(rows)
+		if err != nil {
+			return []*Conversation{}
+		}
+		out = append(out, conv)
+	}
+	if err := rows.Err(); err != nil {
+		return []*Conversation{}
+	}
+	// 排序放在 Go 侧：只有几十个会话，没必要为它多维护一列排序列。
 	sort.Slice(out, func(i, j int) bool {
 		ti, tj := "", ""
 		if out[i].LastMessage != nil {
@@ -145,54 +95,110 @@ func (s *Store) Conversations() []*Conversation {
 
 // Conversation 返回单个会话副本。
 func (s *Store) Conversation(id uint64) *Conversation {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return cloneConversation(s.data.Conversations[id])
+	conv, err := scanConversation(s.db.QueryRow(
+		`SELECT `+conversationColumns+` FROM conversations WHERE id = ?`, id))
+	if err != nil {
+		return nil
+	}
+	return conv
 }
 
 // UpsertConversations 合并服务端会话摘要。
+//
+// 水位（last_seq / read_seq / peer_read_seq）只增不减：服务端响应可能乱序到达，
+// 回退水位会让客户端重新“发现”已读消息或产生假的漏消息。
 func (s *Store) UpsertConversations(list []*Conversation) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, incoming := range list {
-		if incoming == nil {
+	if len(list) == 0 {
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, conv := range list {
+		if conv == nil {
 			continue
 		}
-		existing := s.data.Conversations[incoming.ID]
-		if existing == nil {
-			s.data.Conversations[incoming.ID] = cloneConversation(incoming)
-			continue
-		}
-		existing.Type = incoming.Type
-		existing.LastSeq = maxInt64(existing.LastSeq, incoming.LastSeq)
-		existing.ReadSeq = maxInt64(existing.ReadSeq, incoming.ReadSeq)
-		existing.Unread = incoming.Unread
-		existing.Version = incoming.Version
-		existing.PeerReadSeq = maxInt64(existing.PeerReadSeq, incoming.PeerReadSeq)
-		existing.PeerID = incoming.PeerID
-		existing.Pinned = incoming.Pinned
-		existing.Muted = incoming.Muted
-		existing.JoinedAt = incoming.JoinedAt
-		if incoming.Peer != nil {
-			existing.Peer = incoming.Peer
-		}
-		if incoming.LastMessage != nil {
-			existing.LastMessage = cloneMessage(incoming.LastMessage)
+		if err := upsertConversation(tx, conv); err != nil {
+			return
 		}
 	}
-	_ = s.saveLocked()
+	_ = tx.Commit()
+}
+
+func upsertConversation(tx *sql.Tx, conv *Conversation) error {
+	// 注意：nil 指针装进 any 之后不等于 nil，json.Marshal 会得到 "null"。
+	// 这里显式判空，'' 才表示“本次没有带这个字段，保留旧值”。
+	var peerJSON, lastMsgJSON string
+	var err error
+	if conv.Peer != nil {
+		if peerJSON, err = marshalJSON(conv.Peer); err != nil {
+			return err
+		}
+	}
+	lastMsgSeq := int64(0)
+	if conv.LastMessage != nil {
+		if lastMsgJSON, err = marshalJSON(conv.LastMessage); err != nil {
+			return err
+		}
+		lastMsgSeq = conv.LastMessage.Seq
+	}
+
+	_, err = tx.Exec(`
+		INSERT INTO conversations (`+conversationColumns+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			type          = excluded.type,
+			last_seq      = max(conversations.last_seq, excluded.last_seq),
+			read_seq      = max(conversations.read_seq, excluded.read_seq),
+			unread_count  = excluded.unread_count,
+			version       = excluded.version,
+			peer_read_seq = max(conversations.peer_read_seq, excluded.peer_read_seq),
+			peer_id       = excluded.peer_id,
+			peer_json     = CASE WHEN excluded.peer_json = '' THEN conversations.peer_json ELSE excluded.peer_json END,
+			last_msg_seq  = CASE WHEN excluded.last_msg_json = '' THEN conversations.last_msg_seq ELSE excluded.last_msg_seq END,
+			last_msg_json = CASE WHEN excluded.last_msg_json = '' THEN conversations.last_msg_json ELSE excluded.last_msg_json END,
+			pinned        = excluded.pinned,
+			muted         = excluded.muted,
+			joined_at     = excluded.joined_at`,
+		conv.ID, conv.Type, conv.LastSeq, conv.ReadSeq, conv.Unread, conv.Version,
+		conv.PeerReadSeq, conv.PeerID, peerJSON, lastMsgSeq, lastMsgJSON,
+		boolInt(conv.Pinned), boolInt(conv.Muted), conv.JoinedAt,
+	)
+	return err
 }
 
 // Messages 返回会话消息副本（按 seq 升序）。
 func (s *Store) Messages(conversationID uint64) []*Message {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	raw := s.data.Messages[conversationID]
-	out := make([]*Message, 0, len(raw))
-	for _, m := range raw {
-		out = append(out, cloneMessage(m))
+	rows, err := s.db.Query(`SELECT seq, msg_id, sender_id, client_msg_id, type, body,
+		status, reply_to, version, created_at
+		FROM messages WHERE conversation_id = ? ORDER BY seq ASC`, conversationID)
+	if err != nil {
+		return []*Message{}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	defer rows.Close()
+
+	out := make([]*Message, 0, 64)
+	for rows.Next() {
+		var (
+			msg        = &Message{ConversationID: conversationID}
+			msgType    int64
+			msgVersion int64
+			status     int64
+		)
+		if err := rows.Scan(&msg.Seq, &msg.MsgID, &msg.SenderID, &msg.ClientMsgID,
+			&msgType, &msg.Body, &status, &msg.ReplyTo, &msgVersion, &msg.CreatedAt); err != nil {
+			return []*Message{}
+		}
+		msg.Type = int32(msgType)
+		msg.Status = int32(status)
+		msg.Version = int32(msgVersion)
+		out = append(out, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return []*Message{}
+	}
 	return out
 }
 
@@ -201,114 +207,146 @@ func (s *Store) AddMessage(msg *Message) {
 	if msg == nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := addMessage(tx, msg); err != nil {
+		return
+	}
+	_ = tx.Commit()
+}
 
-	list := s.data.Messages[msg.ConversationID]
-	for _, m := range list {
-		if m.MsgID == msg.MsgID {
-			return
-		}
+// addMessage 插入一条消息并维护会话摘要；返回是否真的写入了新行。
+//
+// 幂等靠唯一索引，不靠先查后插：WS 重连和 HTTP 补洞可能同时送达同一条消息。
+func addMessage(tx *sql.Tx, msg *Message) (bool, error) {
+	res, err := tx.Exec(`
+		INSERT OR IGNORE INTO messages
+			(conversation_id, seq, msg_id, sender_id, client_msg_id, type, body, status, reply_to, version, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ConversationID, msg.Seq, msg.MsgID, msg.SenderID, msg.ClientMsgID,
+		msg.Type, msg.Body, msg.Status, msg.ReplyTo, msg.Version, msg.CreatedAt)
+	if err != nil {
+		return false, err
 	}
-	list = append(list, cloneMessage(msg))
-	sort.Slice(list, func(i, j int) bool { return list[i].Seq < list[j].Seq })
-	s.data.Messages[msg.ConversationID] = list
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected == 0 {
+		return false, nil // 同 msg_id 或同 seq 已存在
+	}
 
-	c := s.data.Conversations[msg.ConversationID]
-	if c == nil {
-		c = &Conversation{ID: msg.ConversationID, PeerID: 0}
-		s.data.Conversations[msg.ConversationID] = c
+	lastMsgJSON, err := marshalJSON(msg)
+	if err != nil {
+		return false, err
 	}
-	c.LastSeq = maxInt64(c.LastSeq, msg.Seq)
-	if c.LastMessage == nil || msg.Seq >= c.LastMessage.Seq {
-		c.LastMessage = cloneMessage(msg)
+	// 会话可能在收到第一条消息前还不存在（WS 先于会话列表到达），一起 upsert。
+	_, err = tx.Exec(`
+		INSERT INTO conversations (id, last_seq, last_msg_seq, last_msg_json)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			last_seq      = max(conversations.last_seq, excluded.last_seq),
+			last_msg_seq  = CASE WHEN conversations.last_msg_seq <= excluded.last_msg_seq
+			                     THEN excluded.last_msg_seq ELSE conversations.last_msg_seq END,
+			last_msg_json = CASE WHEN conversations.last_msg_seq <= excluded.last_msg_seq
+			                     THEN excluded.last_msg_json ELSE conversations.last_msg_json END`,
+		msg.ConversationID, msg.Seq, msg.Seq, lastMsgJSON)
+	if err != nil {
+		return false, err
 	}
-	_ = s.saveLocked()
+	return true, nil
 }
 
 // MarkUnreadZero 清空本地未读（前端已读到最新）。
 func (s *Store) MarkUnreadZero(conversationID uint64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if c := s.data.Conversations[conversationID]; c != nil {
-		c.Unread = 0
-		_ = s.saveLocked()
-	}
+	_, _ = s.db.Exec(`UPDATE conversations SET unread_count = 0 WHERE id = ?`, conversationID)
 }
 
 // SetRead 更新已读位与未读（近似值，服务端会话列表可校准）。
+//
+// 已读只增不减：乱序上报（先 100 再 90）不能把水位退回去。
 func (s *Store) SetRead(conversationID uint64, seq int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c := s.data.Conversations[conversationID]
-	if c == nil {
-		return
-	}
-	c.ReadSeq = maxInt64(c.ReadSeq, seq)
-	if c.ReadSeq >= c.LastSeq {
-		c.Unread = 0
-	} else {
-		c.Unread = c.LastSeq - c.ReadSeq
-	}
-	_ = s.saveLocked()
+	_, _ = s.db.Exec(`
+		UPDATE conversations SET
+			read_seq = ?,
+			unread_count = CASE WHEN ? >= last_seq THEN 0 ELSE last_seq - ? END
+		WHERE id = ? AND read_seq < ?`,
+		seq, seq, seq, conversationID, seq)
 }
 
 // SetPeerRead 更新对端已读位。
 func (s *Store) SetPeerRead(conversationID uint64, seq int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if c := s.data.Conversations[conversationID]; c != nil {
-		c.PeerReadSeq = maxInt64(c.PeerReadSeq, seq)
-		_ = s.saveLocked()
-	}
+	_, _ = s.db.Exec(`UPDATE conversations SET peer_read_seq = ?
+		WHERE id = ? AND peer_read_seq < ?`, seq, conversationID, seq)
 }
 
 func (s *Store) IncrementUnread(conversationID uint64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if c := s.data.Conversations[conversationID]; c != nil {
-		c.Unread++
-		_ = s.saveLocked()
-	}
-}
-
-func cloneConversation(c *Conversation) *Conversation {
-	if c == nil {
-		return nil
-	}
-	cp := *c
-	if c.Peer != nil {
-		p := *c.Peer
-		cp.Peer = &p
-	}
-	cp.LastMessage = cloneMessage(c.LastMessage)
-	return &cp
-}
-
-func cloneMessage(m *Message) *Message {
-	if m == nil {
-		return nil
-	}
-	cp := *m
-	return &cp
-}
-
-func maxInt64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
+	_, _ = s.db.Exec(`UPDATE conversations SET unread_count = unread_count + 1 WHERE id = ?`, conversationID)
 }
 
 // LastSeq 返回本地已连续收到（或拉取到）的最大 seq。
 func (s *Store) LastSeq(conversationID uint64) int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var out int64
-	for _, m := range s.data.Messages[conversationID] {
-		if m.Seq > out {
-			out = m.Seq
+	var seq int64
+	if err := s.db.QueryRow(
+		`SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conversation_id = ?`,
+		conversationID).Scan(&seq); err != nil {
+		return 0
+	}
+	return seq
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanConversation(row rowScanner) (*Conversation, error) {
+	var (
+		conv                  = &Conversation{}
+		peerJSON, lastMsgJSON string
+		pinned, muted         int64
+		convType              int64
+		lastMsgSeq            int64 // 只用于写入时判断“哪条是最新”，读出来不需要
+	)
+	if err := row.Scan(&conv.ID, &convType, &conv.LastSeq, &conv.ReadSeq, &conv.Unread,
+		&conv.Version, &conv.PeerReadSeq, &conv.PeerID, &peerJSON, &lastMsgSeq, &lastMsgJSON,
+		&pinned, &muted, &conv.JoinedAt); err != nil {
+		return nil, err
+	}
+	conv.Type = int32(convType)
+	conv.Pinned = pinned != 0
+	conv.Muted = muted != 0
+	if peerJSON != "" {
+		var peer User
+		if err := json.Unmarshal([]byte(peerJSON), &peer); err == nil {
+			conv.Peer = &peer
 		}
 	}
-	return out
+	if lastMsgJSON != "" {
+		var msg Message
+		if err := json.Unmarshal([]byte(lastMsgJSON), &msg); err == nil {
+			conv.LastMessage = &msg
+		}
+	}
+	return conv, nil
+}
+
+func marshalJSON(v any) (string, error) {
+	if v == nil {
+		return "", nil
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }

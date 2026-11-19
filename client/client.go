@@ -23,16 +23,20 @@ type Client struct {
 	onState func(ConnectionState)
 }
 
-// New 创建客户端；storePath 为空时使用平台默认路径。
-func New(storePath string) (*Client, error) {
-	if storePath == "" {
-		path, err := DefaultStorePath()
+// New 创建客户端；dbPath 为空时使用平台默认路径。
+func New(dbPath string) (*Client, error) {
+	if dbPath == "" {
+		path, err := DefaultDBPath()
 		if err != nil {
 			return nil, fmt.Errorf("定位应用数据目录: %w", err)
 		}
-		storePath = path
+		dbPath = path
 	}
-	return &Client{store: NewStore(storePath)}, nil
+	store, err := NewStore(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("打开本地数据库: %w", err)
+	}
+	return &Client{store: store}, nil
 }
 
 // SetEventHandlers 注册 WS 事件/连接状态回调（Wails 服务在这里桥接事件）。
@@ -122,8 +126,8 @@ func (c *Client) AutoLogin(ctx context.Context) (*SessionInfo, bool, error) {
 	return sessionInfo(session), true, nil
 }
 
-// Close 只断开 WS，保留本地缓存（应用退出时用）。
-func (c *Client) Close() {
+// closeWS 断开 WS，不碰本地库（登出也要用它，因为库还要留着被 Clear）。
+func (c *Client) closeWS() {
 	c.mu.Lock()
 	ws := c.ws
 	c.ws = nil
@@ -133,9 +137,16 @@ func (c *Client) Close() {
 	}
 }
 
-// Logout 断开 WS 并清空本地缓存。
+// Close 关闭 WS 与本地数据库（应用退出时用；之后 Client 不可再用）。
+// 只关连接，不清数据——下次启动还要自动登录。
+func (c *Client) Close() {
+	c.closeWS()
+	_ = c.store.Close()
+}
+
+// Logout 断开 WS 并清空本地数据（库文件保留，下次登录复用）。
 func (c *Client) Logout() {
-	c.Close()
+	c.closeWS()
 	c.mu.Lock()
 	c.http = nil
 	c.session = nil

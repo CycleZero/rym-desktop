@@ -138,6 +138,19 @@ func SecretDir() (string, error) {
 	return filepath.Join(data, "secret"), nil
 }
 
+// DefaultDBPath 返回本地数据库路径（DataDir 下的 rym.db）。
+//
+// 同目录的旧版 store.json 会在首次打开时导入（见 legacy.go）；
+// 不做路径自动迁移——项目还没有真实用户，多一段搬迁代码只会让
+// “到底读哪个文件”多一个分支。
+func DefaultDBPath() (string, error) {
+	dir, err := DataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "rym.db"), nil
+}
+
 // EnsureDir 创建目录（含父目录），权限只作用于新建目录。
 //
 // 故意不 chmod 已存在的目录：调用方可能传进来一个共享目录（测试里的

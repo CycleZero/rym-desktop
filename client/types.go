@@ -82,7 +82,8 @@ type ConnectionState struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
-// StoreData 是本地持久化文件结构（MVP 用 JSON；下一步换 SQLite）。
+// StoreData 是旧版本地 JSON 缓存的结构，只用于首次导入 SQLite（见 legacy.go）。
+// 新代码不要再往里加字段。
 type StoreData struct {
 	Session       *Session                 `json:"session,omitempty"`
 	Conversations map[uint64]*Conversation `json:"conversations,omitempty"`
