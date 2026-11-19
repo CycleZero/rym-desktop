@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -23,11 +24,15 @@ type Client struct {
 }
 
 // New 创建客户端；storePath 为空时使用平台默认路径。
-func New(storePath string) *Client {
+func New(storePath string) (*Client, error) {
 	if storePath == "" {
-		storePath = DefaultStorePath()
+		path, err := DefaultStorePath()
+		if err != nil {
+			return nil, fmt.Errorf("定位应用数据目录: %w", err)
+		}
+		storePath = path
 	}
-	return &Client{store: NewStore(storePath)}
+	return &Client{store: NewStore(storePath)}, nil
 }
 
 // SetEventHandlers 注册 WS 事件/连接状态回调（Wails 服务在这里桥接事件）。

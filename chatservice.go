@@ -18,10 +18,20 @@ type ChatService struct {
 	notifier *notifications.NotificationService
 }
 
-func NewChatService(notifier *notifications.NotificationService) *ChatService {
-	s := &ChatService{c: client.New(""), notifier: notifier}
+func NewChatService(notifier *notifications.NotificationService) (*ChatService, error) {
+	c, err := client.New("")
+	if err != nil {
+		return nil, err
+	}
+	s := &ChatService{c: c, notifier: notifier}
 	s.c.SetEventHandlers(s.emitEvent, s.emitState)
-	return s
+	return s, nil
+}
+
+// DataDir 暴露数据目录，前端「关于」里直接展示，方便用户备份/反馈问题。
+func (s *ChatService) DataDir() string {
+	dir, _ := client.DataDir()
+	return dir
 }
 
 // ServiceName 让 Wails 把它当作普通服务管理生命周期。

@@ -96,10 +96,26 @@ go mod tidy
 - 只有窗口不可见或失焦时才发系统通知；自己的消息不通知。
 - macOS 首次会请求通知授权；Linux 需要桌面环境支持通知区域（没有托盘时仍可用窗口模式）。
 
-## 本地缓存
+## 数据存放位置
 
-MVP 用 `~/.config/rym-desktop/store.json`（原子写入，0600）保存 session、会话和消息；
-下一步替换为 SQLite。Token 目前与 store 同文件，后续接系统 keychain。
+只有两个目录（`client/paths.go`）：
+
+| 平台 | 数据（不可删） | 缓存（可随时删） |
+|---|---|---|
+| Windows | `%LOCALAPPDATA%\rym-desktop` | `%LOCALAPPDATA%\rym-desktop\cache` |
+| macOS | `~/Library/Application Support/rym-desktop` | `~/Library/Caches/rym-desktop` |
+| Linux | `$XDG_DATA_HOME/rym-desktop`（默认 `~/.local/share/rym-desktop`） | `$XDG_CACHE_HOME/rym-desktop`（默认 `~/.cache/rym-desktop`） |
+
+- 数据目录：`store.json`（session、会话、消息），原子写入，目录 0700 / 文件 0600；
+  下一步换成 SQLite，仍放这里。
+- 缓存目录：WebView 浏览器数据等，删掉只会丢缓存，不影响登录态和消息。
+- Windows 用 **Local** 而不是 Roaming：消息库会持续增长，放 Roaming 会被域漫游
+  同步到服务器、拖慢登录，且网络盘上跑 SQLite 容易损坏。代价是设置项也不漫游。
+- Token 目前与 `store.json` 同文件，后续接系统 keychain（Linux 需要 Secret
+  Service，缺失时回退到 0600 文件）。
+
+早期版本把 store 写在 `~/.config/rym-desktop/`，不做自动迁移：老环境重新登录一次，
+旧目录可以手工删除。
 
 ## 测试
 

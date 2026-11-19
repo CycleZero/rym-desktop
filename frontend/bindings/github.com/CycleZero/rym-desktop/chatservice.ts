@@ -31,6 +31,13 @@ export function Conversations(): $CancellablePromise<(client$0.Conversation | nu
 }
 
 /**
+ * DataDir 暴露数据目录，前端「关于」里直接展示，方便用户备份/反馈问题。
+ */
+export function DataDir(): $CancellablePromise<string> {
+    return $Call.ByID(403495274);
+}
+
+/**
  * Login 登录并建立 WS。
  */
 export function Login(serverURL: string, wsPort: number, username: string, password: string): $CancellablePromise<client$0.SessionInfo | null> {

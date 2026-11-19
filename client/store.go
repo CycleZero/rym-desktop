@@ -29,12 +29,17 @@ func NewStore(path string) *Store {
 	return s
 }
 
-// DefaultStorePath 返回平台配置目录下的 store.json。
-func DefaultStorePath() string {
-	if dir, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(dir, "rym-desktop", "store.json")
+// DefaultStorePath 返回数据目录下的 store.json。
+//
+// 注意：早期版本写在 os.UserConfigDir()（Linux 是 ~/.config）下，
+// 现在统一到 DataDir()；不做自动迁移——项目还没有真实用户，
+// 多一段搬迁代码只会在两处路径之间留下歧义。代价是老环境需重新登录一次。
+func DefaultStorePath() (string, error) {
+	dir, err := DataDir()
+	if err != nil {
+		return "", err
 	}
-	return "rym-desktop-store.json"
+	return filepath.Join(dir, "store.json"), nil
 }
 
 func (s *Store) load() error {

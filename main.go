@@ -3,8 +3,11 @@ package main
 import (
 	"embed"
 	"log"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 
+	"github.com/CycleZero/rym-desktop/client"
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 	"github.com/wailsapp/wails/v3/pkg/services/notifications"
@@ -23,7 +26,15 @@ func init() {
 
 func main() {
 	notifier := notifications.New()
-	chat := NewChatService(notifier)
+	chat, err := NewChatService(notifier)
+	if err != nil {
+		// 拿不到数据目录说明 HOME / LOCALAPPDATA 都缺失，
+		// 与其静默写到当前目录，不如直接退出。
+		log.Fatalf("初始化客户端失败: %v", err)
+	}
+	if dir, err := client.DataDir(); err == nil {
+		log.Printf("数据目录: %s", dir)
+	}
 
 	app := application.New(application.Options{
 		Name:        "rym",
@@ -40,6 +51,9 @@ func main() {
 		},
 		Windows: application.WindowsOptions{
 			DisableQuitOnLastWindowClosed: true,
+			// WebView2 默认把浏览器数据写进 %APPDATA%\{BinaryName}（Roaming），
+			// 会随域漫游同步且体积不小；挪到我们的本机缓存目录。
+			WebviewUserDataPath: webviewDataPath(),
 		},
 		Linux: application.LinuxOptions{
 			DisableQuitOnLastWindowClosed: true,
@@ -113,4 +127,19 @@ func main() {
 	if err := app.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// webviewDataPath 把 WebView 的浏览器数据放进本机缓存目录。
+// 返回空字符串时 Wails 用自己的默认值（Linux/macOS 本来就是缓存目录）。
+func webviewDataPath() string {
+	dir, err := client.CacheDir()
+	if err != nil {
+		return ""
+	}
+	path := filepath.Join(dir, "webview")
+	// WebView2 要求目录可用，否则会弹错误框并退出。
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return ""
+	}
+	return path
 }

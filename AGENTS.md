@@ -31,12 +31,34 @@ main.go            Wails 入口
 
 ## 当前 MVP 与代价
 
-- 本地缓存用单个 JSON 文件（`~/.config/rym-desktop/store.json`，原子写）；
-  下一步换 SQLite（`modernc.org/sqlite`，纯 Go）。
+- 本地缓存用单个 JSON 文件（`DataDir()/store.json`，原子写，目录 0700 / 文件 0600）；
+  下一步换 SQLite（`modernc.org/sqlite`，纯 Go），仍放 `DataDir()`。
 - token 与 store 同文件；下一步接系统 keychain。
 - 没有 outbox 持久化；发送失败由 UI 保留输入，后续补 outbox。
 - 托盘/通知已接：关闭窗口收进托盘；窗口不可见/失焦时发通知。
 - 没有群聊/媒体/撤回/离线推送。
+
+## 本地目录（不要自由发挥）
+
+只分两个目录，定义在 `client/paths.go`：
+
+| 平台 | `DataDir()` | `CacheDir()` |
+|---|---|---|
+| Windows | `%LOCALAPPDATA%\rym-desktop` | `%LOCALAPPDATA%\rym-desktop\cache` |
+| macOS | `~/Library/Application Support/rym-desktop` | `~/Library/Caches/rym-desktop` |
+| Linux | `$XDG_DATA_HOME/rym-desktop` 或 `~/.local/share/rym-desktop` | `$XDG_CACHE_HOME/rym-desktop` 或 `~/.cache/rym-desktop` |
+
+硬约束：
+
+- 路径只在 `client/paths.go` 解析；其它地方不要再拼 `os.UserConfigDir` / `HOME`。
+- 不加 config/state/secret 目录层级。当前没有用户可编辑配置文件，会话/消息/登录态
+  都是 data；真需要时再加 `ConfigDir()`，调用点不变。
+- Windows 一律用 Local，不用 Roaming：SQLite 在漫游网络盘上会损坏，且消息库会让
+  域漫游配置膨胀。
+- 路径解析不读业务配置、不做环境变量覆盖（XDG 是平台约定，不是我们的配置）；
+  测试需要隔离时直接给 `New(storePath)` 传临时路径。
+- `CacheDir()` 必须能整体删除而不影响登录态与消息。
+- `store.json` 含 token：目录 0700、文件 0600，不得放宽。
 
 ## 坑
 

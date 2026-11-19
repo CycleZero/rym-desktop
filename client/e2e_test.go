@@ -37,8 +37,14 @@ func TestE2E(t *testing.T) {
 	bobName := fmt.Sprintf("e2ebob%d", suffix)
 	const password = "password123"
 
-	alice := New(filepath.Join(t.TempDir(), "alice.json"))
-	bob := New(filepath.Join(t.TempDir(), "bob.json"))
+	alice, err := New(filepath.Join(t.TempDir(), "alice.json"))
+	if err != nil {
+		t.Fatalf("创建 alice 客户端: %v", err)
+	}
+	bob, err := New(filepath.Join(t.TempDir(), "bob.json"))
+	if err != nil {
+		t.Fatalf("创建 bob 客户端: %v", err)
+	}
 	defer alice.Logout()
 	defer bob.Logout()
 
