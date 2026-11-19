@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+# Wails 生成的 TypeScript 绑定在 GitHub 上折叠展示
+frontend/bindings/** linguist-generated=true

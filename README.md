@@ -1,0 +1,95 @@
+# rym-desktop
+
+rym 的桌面客户端：**Wails v3 + Go + React/TypeScript**。
+
+- 网络、WS 重连、本地缓存都在 Go 侧（`client/`）
+- 前端只做 UI，通过 Wails bindings/events 与 Go 通信
+- 服务端契约见 [../rym/docs/client-protocol.md](../rym/docs/client-protocol.md)
+
+## 当前范围（MVP）
+
+- 注册 / 登录 / 自动登录
+- 会话列表（peer 昵称、最后一条、未读）
+- 搜索用户、打开单聊
+- 拉历史、发文本、WS 实时收消息
+- 已读上报、对方已读位
+- 连接状态 / 断线重连
+
+暂不做：群聊建群、图片/文件、撤回/编辑、离线推送、presence/正在输入。
+
+## 目录
+
+```
+client/              Go 客户端核心（HTTP / WS / JSON Store）
+chatservice.go       Wails 服务：把 client 包装成前端绑定
+main.go              Wails 应用入口
+frontend/            React + TypeScript + Vite
+frontend/bindings/   Wails 生成的 TS 绑定（入库）
+```
+
+## 运行
+
+前置：
+
+- Go 1.26+（本项目用 1.27）
+- Node.js 20+ / npm
+- Wails v3.1：`go install github.com/wailsapp/wails/v3/cmd/wails3@latest`
+- Windows：WebView2 运行时
+- Linux：GTK4 + WebKitGTK 6.0
+- WSL 下如果默认 gcc 是 conda 的，需要显式用系统 gcc：`CC=/usr/bin/gcc`
+
+```bash
+cd frontend && npm install
+cd ..
+wails3 dev          # 开发（热更新）
+wails3 build        # 产物在 bin/rym-desktop
+```
+
+WSL 构建 Linux：
+
+```bash
+CC=/usr/bin/gcc wails3 build
+```
+
+## 后端配置
+
+服务端需要开启 WS：
+
+```yaml
+server:
+  ws:
+    enable: true
+    host: "0.0.0.0"
+    port: 8001
+```
+
+登录页填写：
+
+- 服务端地址：`http://<host>:8000`
+- WS 端口：`8001`
+- 用户名 / 密码
+
+## 本地缓存
+
+MVP 用 `~/.config/rym-desktop/store.json`（原子写入，0600）保存 session、会话和消息；
+下一步替换为 SQLite。Token 目前与 store 同文件，后续接系统 keychain。
+
+## 测试
+
+```bash
+go test ./client
+```
+
+真实服务端 E2E（默认 skip）：
+
+```bash
+RYM_E2E_BASE=http://127.0.0.1:18082 \
+RYM_E2E_WS_PORT=18083 \
+go test ./client -run TestE2E -v
+```
+
+## 说明
+
+- 桌面端 WS 直接用 `Authorization: Bearer`，不需要 ticket；
+- 浏览器/Flutter Web 才需要 `POST /v1/im/ws-ticket`；
+- Wails 版本跟随 latest（v3.x）；升级后跑一次登录/收消息/打包冒烟。
