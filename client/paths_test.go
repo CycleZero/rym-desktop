@@ -45,6 +45,99 @@ func TestDataDirHonoursXDG(t *testing.T) {
 	}
 }
 
+func TestConfigDir(t *testing.T) {
+	dir, err := ConfigDir()
+	if err != nil {
+		t.Fatalf("ConfigDir: %v", err)
+	}
+	if !filepath.IsAbs(dir) || filepath.Base(dir) != appDirName {
+		t.Fatalf("ConfigDir = %q，期望绝对路径且末级为 %q", dir, appDirName)
+	}
+}
+
+func TestConfigDirHonoursXDG(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("XDG 只影响 Linux/BSD")
+	}
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	dir, err := ConfigDir()
+	if err != nil {
+		t.Fatalf("ConfigDir: %v", err)
+	}
+	if want := filepath.Join(root, appDirName); dir != want {
+		t.Fatalf("ConfigDir = %q，期望 %q", dir, want)
+	}
+}
+
+// macOS/Windows 没有独立的 state 目录约定，跟数据目录同根；
+// Linux 走 XDG_STATE_HOME。
+func TestStateDir(t *testing.T) {
+	dir, err := StateDir()
+	if err != nil {
+		t.Fatalf("StateDir: %v", err)
+	}
+	if !filepath.IsAbs(dir) {
+		t.Fatalf("StateDir 应为绝对路径，得到 %q", dir)
+	}
+	if runtime.GOOS == "linux" {
+		root := t.TempDir()
+		t.Setenv("XDG_STATE_HOME", root)
+		dir, err = StateDir()
+		if err != nil {
+			t.Fatalf("StateDir: %v", err)
+		}
+		if want := filepath.Join(root, appDirName); dir != want {
+			t.Fatalf("StateDir = %q，期望 %q", dir, want)
+		}
+		return
+	}
+	data, err := DataDir()
+	if err != nil {
+		t.Fatalf("DataDir: %v", err)
+	}
+	if dir != data {
+		t.Fatalf("StateDir = %q，期望与 DataDir 相同（%q）", dir, data)
+	}
+}
+
+func TestSecretDir(t *testing.T) {
+	dir, err := SecretDir()
+	if err != nil {
+		t.Fatalf("SecretDir: %v", err)
+	}
+	data, err := DataDir()
+	if err != nil {
+		t.Fatalf("DataDir: %v", err)
+	}
+	if want := filepath.Join(data, "secret"); dir != want {
+		t.Fatalf("SecretDir = %q，期望 %q", dir, want)
+	}
+}
+
+func TestEnsureDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "a", "b")
+	if err := EnsureDir(dir, 0o700); err != nil {
+		t.Fatalf("EnsureDir: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%q 不是目录", dir)
+	}
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0o700 {
+			t.Fatalf("新建目录权限 = %o，期望 700", perm)
+		}
+	}
+	// 重复调用必须幂等。
+	if err := EnsureDir(dir, 0o700); err != nil {
+		t.Fatalf("EnsureDir 重复调用: %v", err)
+	}
+}
+
 func TestCacheDir(t *testing.T) {
 	dir, err := CacheDir()
 	if err != nil {

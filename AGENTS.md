@@ -40,24 +40,30 @@ main.go            Wails 入口
 
 ## 本地目录（不要自由发挥）
 
-只分两个目录，定义在 `client/paths.go`：
+五个目录全部定义在 `client/paths.go`，**其它地方不得再拼 `HOME` / `AppData` /
+`XDG_*`**：
 
-| 平台 | `DataDir()` | `CacheDir()` |
-|---|---|---|
-| Windows | `%LOCALAPPDATA%\rym-desktop` | `%LOCALAPPDATA%\rym-desktop\cache` |
-| macOS | `~/Library/Application Support/rym-desktop` | `~/Library/Caches/rym-desktop` |
-| Linux | `$XDG_DATA_HOME/rym-desktop` 或 `~/.local/share/rym-desktop` | `$XDG_CACHE_HOME/rym-desktop` 或 `~/.cache/rym-desktop` |
+| 函数 | Windows | macOS | Linux | 现状 |
+|---|---|---|---|---|
+| `ConfigDir()` | `%APPDATA%\rym-desktop` | `~/Library/Application Support/rym-desktop` | `$XDG_CONFIG_HOME/rym-desktop` | 预留 |
+| `DataDir()` | `%LOCALAPPDATA%\rym-desktop` | `~/Library/Application Support/rym-desktop` | `$XDG_DATA_HOME/rym-desktop` | 已用 |
+| `StateDir()` | 同 DataDir | 同 DataDir | `$XDG_STATE_HOME/rym-desktop` | 预留 |
+| `CacheDir()` | `<DataDir>\cache` | `~/Library/Caches/rym-desktop` | `$XDG_CACHE_HOME/rym-desktop` | 已用 |
+| `SecretDir()` | `<DataDir>\secret` | `<DataDir>/secret` | `<DataDir>/secret` | 预留 |
 
 硬约束：
 
-- 路径只在 `client/paths.go` 解析；其它地方不要再拼 `os.UserConfigDir` / `HOME`。
-- 不加 config/state/secret 目录层级。当前没有用户可编辑配置文件，会话/消息/登录态
-  都是 data；真需要时再加 `ConfigDir()`，调用点不变。
-- Windows 一律用 Local，不用 Roaming：SQLite 在漫游网络盘上会损坏，且消息库会让
-  域漫游配置膨胀。
+- `ConfigDir` / `StateDir` / `SecretDir` 现在没有调用方，但**不是死代码**：
+  加设置项、日志、keychain 时直接调用，不要新增路径解析或平台分支。
+- 语义别串：用户可编辑设置进 Config，消息/会话/DB 进 Data，窗口位置/日志进 State，
+  可删的进 Cache，凭据进 Secret（文件兜底时必须 `EnsureDir(dir, 0o700)` + 0600）。
+- **Windows 一律用 Local，不用 Roaming**：SQLite 在漫游网络盘上会损坏，且消息库会让
+  域漫游配置膨胀。只有 Config 用 `%APPDATA%`（小配置可漫游）。
+- macOS 上 Config/Data/State 同路径是 Apple 的约定，不是 bug，不要再拆子目录。
 - 路径解析不读业务配置、不做环境变量覆盖（XDG 是平台约定，不是我们的配置）；
-  测试需要隔离时直接给 `New(storePath)` 传临时路径。
+  测试隔离直接给 `New(storePath)` 传临时路径。
 - `CacheDir()` 必须能整体删除而不影响登录态与消息。
+- `EnsureDir` 只对新建目录生效，**不要**改成顺手 chmod 已有目录：调用方可能传共享目录。
 - `store.json` 含 token：目录 0700、文件 0600，不得放宽。
 
 ## 坑

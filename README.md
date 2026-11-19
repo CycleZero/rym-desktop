@@ -98,21 +98,31 @@ go mod tidy
 
 ## 数据存放位置
 
-只有两个目录（`client/paths.go`）：
+五个目录的解析集中在 `client/paths.go`，**任何时候都调对应函数，不要自己拼路径**。
 
-| 平台 | 数据（不可删） | 缓存（可随时删） |
-|---|---|---|
-| Windows | `%LOCALAPPDATA%\rym-desktop` | `%LOCALAPPDATA%\rym-desktop\cache` |
-| macOS | `~/Library/Application Support/rym-desktop` | `~/Library/Caches/rym-desktop` |
-| Linux | `$XDG_DATA_HOME/rym-desktop`（默认 `~/.local/share/rym-desktop`） | `$XDG_CACHE_HOME/rym-desktop`（默认 `~/.cache/rym-desktop`） |
+| 用途 | Windows | macOS | Linux | 现状 |
+|---|---|---|---|---|
+| `ConfigDir()` 用户设置 | `%APPDATA%\rym-desktop` | `~/Library/Application Support/rym-desktop` | `$XDG_CONFIG_HOME/rym-desktop` 或 `~/.config/rym-desktop` | 预留 |
+| `DataDir()` 消息数据 | `%LOCALAPPDATA%\rym-desktop` | `~/Library/Application Support/rym-desktop` | `$XDG_DATA_HOME/rym-desktop` 或 `~/.local/share/rym-desktop` | 已用 |
+| `StateDir()` 运行状态 | `%LOCALAPPDATA%\rym-desktop` | `~/Library/Application Support/rym-desktop` | `$XDG_STATE_HOME/rym-desktop` 或 `~/.local/state/rym-desktop` | 预留 |
+| `CacheDir()` 缓存 | `%LOCALAPPDATA%\rym-desktop\cache` | `~/Library/Caches/rym-desktop` | `$XDG_CACHE_HOME/rym-desktop` 或 `~/.cache/rym-desktop` | 已用 |
+| `SecretDir()` 凭据 | `%LOCALAPPDATA%\rym-desktop\secret` | `~/Library/Application Support/rym-desktop/secret` | `~/.local/share/rym-desktop/secret` | 预留 |
 
-- 数据目录：`store.json`（session、会话、消息），原子写入，目录 0700 / 文件 0600；
+约定：
+
+- **DataDir**：`store.json`（session、会话、消息），原子写入，目录 0700 / 文件 0600；
   下一步换成 SQLite，仍放这里。
-- 缓存目录：WebView 浏览器数据等，删掉只会丢缓存，不影响登录态和消息。
-- Windows 用 **Local** 而不是 Roaming：消息库会持续增长，放 Roaming 会被域漫游
-  同步到服务器、拖慢登录，且网络盘上跑 SQLite 容易损坏。代价是设置项也不漫游。
-- Token 目前与 `store.json` 同文件，后续接系统 keychain（Linux 需要 Secret
-  Service，缺失时回退到 0600 文件）。
+- **CacheDir**：WebView 浏览器数据等，整体删掉只丢缓存，不影响登录态和消息。
+- **StateDir**：窗口位置、日志这类“该持久但不该备份”的东西。只有 Linux 有专门的
+  XDG state 目录，Windows/macOS 与 DataDir 同根（不为了对称硬造子目录）。
+- **ConfigDir**：用户可编辑的小配置。macOS 上与 DataDir 同路径——Apple 没有单独的
+  配置文件目录，非 plist 文件都放 Application Support，这是平台事实。
+- **SecretDir**：目标是系统凭据库（Windows Credential Manager / macOS Keychain /
+  Linux Secret Service），文件只是兜底；兜底时先 `EnsureDir(dir, 0o700)`，文件 0600。
+- Windows 的 Data/State/Cache/Secret 用 **Local** 而不是 Roaming：消息库会持续增长，
+  放 Roaming 会被域漫游同步到服务器（拖慢登录），且网络盘上跑 SQLite 容易损坏。
+  只有 Config 用 `%APPDATA%`，保持“小配置可漫游”的 Windows 惯例。
+- Token 目前与 `store.json` 同文件，后续接 keychain。
 
 早期版本把 store 写在 `~/.config/rym-desktop/`，不做自动迁移：老环境重新登录一次，
 旧目录可以手工删除。

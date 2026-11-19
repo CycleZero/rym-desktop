@@ -72,7 +72,7 @@ func (s *Store) Save() error {
 }
 
 func (s *Store) saveLocked() error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+	if err := EnsureDir(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
 	raw, err := json.MarshalIndent(s.data, "", "  ")
