@@ -122,6 +122,23 @@ wails3 dev
 wails3 build
 ```
 
+Windows（交叉编译，无需 cgo）：
+
+```bash
+wails3 build GOOS=windows
+wails3 package GOOS=windows INSTALL_SCOPE=user
+```
+
+## Windows 实机注意
+
+- 窗口 `Width/Height` 是 **DIP**，实际像素要乘系统缩放（150% → 1.5x）。
+  用 PowerShell 之类 DPI-unaware 进程截图时，`GetWindowRect` 返回的是虚拟化坐标，
+  直接按它建位图会截掉右/下部分；要乘 `GetDpiForWindow/96` 再 `PrintWindow`。
+- WebView2 数据目录通过 `Windows.WebviewUserDataPath` 指到 `CacheDir()/webview`，
+  不要让它落回 `%APPDATA%`（Roaming）。
+- 登录页等高卡片必须放在可滚动容器里：小窗口 / 高缩放下不能依赖垂直居中，
+  否则按钮会被挤出可视区且无法触达。
+
 WSL 下如果默认 gcc 是 conda 的：
 
 ```bash

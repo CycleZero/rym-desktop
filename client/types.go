@@ -13,7 +13,7 @@ type User struct {
 // Session 是本地持久化的登录态（Token 不返回给前端绑定）。
 type Session struct {
 	User      User   `json:"user"`
-	Token     string `json:"token"`
+	Token     string `json:"token,omitempty"`
 	ServerURL string `json:"server_url"`
 	WSPort    int    `json:"ws_port"`
 }

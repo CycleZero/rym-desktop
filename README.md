@@ -57,6 +57,24 @@ WSL 构建 Linux：
 CC=/usr/bin/gcc wails3 build
 ```
 
+## Windows 打包
+
+Wails v3 Windows 用的是纯 Go 的 WebView2 绑定，**交叉编译不需要 cgo / mingw**：
+
+```bash
+wails3 build GOOS=windows            # bin/rym-desktop.exe（GUI 子系统）
+wails3 package GOOS=windows INSTALL_SCOPE=user   # bin/rym-desktop-amd64-installer.exe
+```
+
+- `INSTALL_SCOPE=user` 装到 `%LOCALAPPDATA%\Programs\rym`，不需要 UAC；
+  不传则默认 machine 级（`%ProgramFiles%`，需要管理员）。
+- `package` 需要 NSIS 的 `makensis`：Windows 装 NSIS 3；Linux 上
+  `apt-get install nsis`（没有 root 时可 `apt-get download nsis nsis-common` +
+  `dpkg-deb -x`，再把 `usr/bin` 加进 PATH、`NSISDIR` 指向 `usr/share/nsis`）。
+- 安装包会自动带上 WebView2 引导器（`build/windows/nsis/MicrosoftEdgeWebview2Setup.exe`），
+  目标机器缺少 WebView2 时会静默安装。
+- 静默卸载：`%LOCALAPPDATA%\Programs\rym\uninstall.exe /S`。
+
 ## 后端配置
 
 服务端需要开启 WS：
