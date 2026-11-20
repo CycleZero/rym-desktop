@@ -33,7 +33,10 @@ const styles = `
   * { box-sizing: border-box; }
   body { margin: 0; font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; background: #12141c; color: #e7eaf3; }
   .r-root { height: 100vh; display: flex; flex-direction: column; }
-  .r-login { width: 360px; margin: auto; padding: 28px; background: #1b1e29; border: 1px solid #2b3040; border-radius: 14px; }
+  /* 登录页必须可滚动：Windows 常见 150%/200% 缩放下 760px 高的窗口
+     装不下整张卡片，之前按钮会被挤到可视区外且无法触达。 */
+  .r-login-wrap { flex: 1; min-height: 0; overflow: auto; padding: 24px 16px; display: flex; flex-direction: column; justify-content: safe center; }
+  .r-login { width: 360px; max-width: 100%; margin: 0 auto; flex: none; padding: 28px; background: #1b1e29; border: 1px solid #2b3040; border-radius: 14px; }
   .r-login h1 { margin: 0 0 6px; font-size: 22px; }
   .r-login p { margin: 0 0 20px; color: #8b93a7; font-size: 13px; }
   .r-field { margin-bottom: 12px; }
@@ -280,6 +283,7 @@ export default function App() {
     return (
       <div className="r-root">
         <style>{styles}</style>
+        <div className="r-login-wrap">
         <div className="r-login">
           <h1>rym</h1>
           <p>桌面客户端 · 登录后开始聊天</p>
@@ -310,6 +314,7 @@ export default function App() {
             {registerMode ? '已有账号？去登录' : '没有账号？注册一个'}
           </div>
           {error && <div className="r-error">{error}</div>}
+        </div>
         </div>
       </div>
     )
