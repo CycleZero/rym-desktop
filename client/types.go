@@ -38,6 +38,9 @@ type Message struct {
 	ReplyTo        string `json:"reply_to"`
 	Version        int32  `json:"version"`
 	CreatedAt      string `json:"created_at"`
+	// State / Error 只对本地未确认消息有值（sending / failed）；服务端消息为空。
+	State string `json:"state,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 // Conversation 是会话摘要。
@@ -68,6 +71,14 @@ type Event struct {
 type MessageCreatedData struct {
 	ConversationID uint64  `json:"conversation_id"`
 	Message        Message `json:"message"`
+}
+
+// MessageSentData 是本地发送结果的推送（message.sent / message.failed）。
+type MessageSentData struct {
+	ConversationID uint64   `json:"conversation_id"`
+	ClientMsgID    string   `json:"client_msg_id"`
+	Message        *Message `json:"message,omitempty"`
+	Error          string   `json:"error,omitempty"`
 }
 
 type ReadUpdatedData struct {

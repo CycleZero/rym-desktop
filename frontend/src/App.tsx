@@ -10,6 +10,10 @@ type Message = {
   sender_id: number
   body: string
   created_at: string
+  client_msg_id?: string
+  // 仅本地未确认消息：sending / failed；服务端消息为空。
+  state?: string
+  error?: string
 }
 type Conversation = {
   id: number
@@ -70,6 +74,8 @@ const styles = `
   .r-messages { flex: 1; overflow: auto; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
   .r-msg { max-width: 68%; padding: 9px 12px; border-radius: 12px; background: #1b1e29; border: 1px solid #2b3040; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
   .r-msg.mine { align-self: flex-end; background: #2e4f9e; border-color: #3d63bd; }
+  .r-msg.pending { opacity: .65; }
+  .r-msg.failed { background: #3a2027; border-color: #a3404f; }
   .r-msg-meta { font-size: 10px; color: #8b93a7; margin-top: 4px; }
   .r-compose { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #232838; }
   .r-compose input { flex: 1; padding: 10px 12px; background: #12141c; border: 1px solid #2b3040; border-radius: 9px; color: #e7eaf3; }
@@ -124,9 +130,10 @@ export default function App() {
     try {
       const list = (await ChatService.Messages(conv.id, 0, 50)) as unknown as Message[]
       setMessages(list)
-      const last = list.length ? list[list.length - 1].seq : 0
-      if (last > 0) {
-        await ChatService.MarkRead(conv.id, last)
+      // 未确认的本地消息 seq=0 且排在最后，不能用最后一条算已读。
+      const maxSeq = list.reduce((acc, m) => (m.seq > acc ? m.seq : acc), 0)
+      if (maxSeq > 0) {
+        await ChatService.MarkRead(conv.id, maxSeq)
       }
     } catch (e: any) {
       setError(String(e?.message || e))
@@ -174,14 +181,19 @@ export default function App() {
 
     Events.On('im:event', (event: any) => {
       const ev = event?.data ?? event
-      if (ev?.type === 'message.created') {
-        const convID = ev?.data?.conversation_id
+      const type = ev?.type
+      const convID = ev?.data?.conversation_id
+      // message.sent / message.failed 是本地发送队列的结果（服务端确认 / 4xx）。
+      if (type === 'message.created' || type === 'message.sent' || type === 'message.failed') {
         refreshConversations()
         const current = selectedRef.current
         if (current && current.id === convID) {
           loadMessages(current)
         }
-      } else if (ev?.type === 'read.updated') {
+        if (type === 'message.failed' && ev?.data?.error) {
+          setError(`消息发送失败：${ev.data.error}`)
+        }
+      } else if (type === 'read.updated') {
         refreshConversations()
       }
     })
@@ -247,10 +259,15 @@ export default function App() {
     const text = input.trim()
     setInput('')
     try {
+      // 立即返回“发送中”的本地消息，确认结果由 message.sent 事件推进来。
       const msg = (await ChatService.SendMessage(selected.id, text)) as Message
       setMessages((prev) => {
-        if (prev.some((m) => m.msg_id === msg.msg_id)) return prev
-        return [...prev, msg]
+        const same = prev.some(
+          (m) =>
+            (msg.msg_id && m.msg_id === msg.msg_id) ||
+            (msg.client_msg_id && m.client_msg_id === msg.client_msg_id),
+        )
+        return same ? prev : [...prev, msg]
       })
       refreshConversations()
     } catch (e: any) {
@@ -358,9 +375,16 @@ export default function App() {
               </div>
               <div className="r-messages">
                 {messages.map((m) => (
-                  <div key={m.msg_id || `${m.conversation_id}-${m.seq}`} className={`r-msg ${m.sender_id === session.user.id ? 'mine' : ''}`}>
+                  <div
+                    key={m.msg_id || m.client_msg_id || `${m.conversation_id}-${m.seq}`}
+                    className={`r-msg ${m.sender_id === session.user.id ? 'mine' : ''} ${m.state === 'sending' ? 'pending' : ''} ${m.state === 'failed' ? 'failed' : ''}`}
+                  >
                     {textOf(m.body)}
-                    <div className="r-msg-meta">{timeOf(m.created_at)}</div>
+                    <div className="r-msg-meta">
+                      {timeOf(m.created_at)}
+                      {m.state === 'sending' && ' · 发送中…'}
+                      {m.state === 'failed' && ` · 发送失败${m.error ? `：${m.error}` : ''}`}
+                    </div>
                   </div>
                 ))}
               </div>

@@ -22,6 +22,14 @@ type Client struct {
 
 	onEvent func(Event)
 	onState func(ConnectionState)
+
+	// 发送队列：sendPending 默认走 HTTP，测试注入假实现。
+	sendPending   pendingSender
+	outboxMu      sync.Mutex
+	outboxRunning bool
+	outboxStop    context.CancelFunc
+	outboxBase    time.Duration
+	outboxMax     time.Duration
 }
 
 // New 创建客户端；dbPath 为空时使用平台默认路径。
@@ -42,7 +50,14 @@ func newClient(dbPath string, tokens tokenStore) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("打开本地数据库: %w", err)
 	}
-	return &Client{store: store, tokens: tokens}, nil
+	c := &Client{
+		store:      store,
+		tokens:     tokens,
+		outboxBase: time.Second,
+		outboxMax:  30 * time.Second,
+	}
+	c.sendPending = c.sendPendingHTTP
+	return c, nil
 }
 
 // SetEventHandlers 注册 WS 事件/连接状态回调（Wails 服务在这里桥接事件）。
@@ -81,6 +96,12 @@ func (c *Client) Login(ctx context.Context, serverURL string, wsPort int, userna
 		WSPort:    wsPort,
 	}
 
+	// 换账号：清掉上一个账号的本地消息与发送队列。
+	// 必须清 outbox，否则会用新账号把别人的待发消息发出去。
+	if cached := c.store.Session(); cached != nil && cached.User.ID != 0 && cached.User.ID != data.User.ID {
+		c.store.Clear()
+	}
+
 	c.mu.Lock()
 	c.http = hc
 	c.session = session
@@ -92,9 +113,11 @@ func (c *Client) Login(ctx context.Context, serverURL string, wsPort int, userna
 	if _, err := c.fetchConversations(ctx); err != nil {
 		// 登录成功但列表失败：保留登录态，返回错误让 UI 重试。
 		c.startWS()
+		go c.flushOutbox() // 上次没发完的消息继续发
 		return sessionInfo(session), err
 	}
 	c.startWS()
+	go c.flushOutbox()
 	return sessionInfo(session), nil
 }
 
@@ -126,7 +149,8 @@ func (c *Client) AutoLogin(ctx context.Context) (*SessionInfo, bool, error) {
 	user, err := hc.me(ctx)
 	if err != nil {
 		if errors.Is(err, ErrUnauthorized) {
-			c.store.Clear()
+			// 只清令牌，保留本地消息与发送队列：同一用户重新登录后还能补发。
+			// 换账号时由 Login 按 user_id 清库（见 Login 里的 cached 判断）。
 			_ = c.tokens.Delete()
 			return nil, false, nil
 		}
@@ -142,9 +166,11 @@ func (c *Client) AutoLogin(ctx context.Context) (*SessionInfo, bool, error) {
 
 	if _, err := c.fetchConversations(ctx); err != nil {
 		c.startWS()
+		go c.flushOutbox()
 		return sessionInfo(session), true, err
 	}
 	c.startWS()
+	go c.flushOutbox()
 	return sessionInfo(session), true, nil
 }
 
@@ -163,12 +189,14 @@ func (c *Client) closeWS() {
 // 只关连接，不清数据——下次启动还要自动登录。
 func (c *Client) Close() {
 	c.closeWS()
+	c.stopOutbox()
 	_ = c.store.Close()
 }
 
 // Logout 断开 WS 并清空本地数据（库文件保留，下次登录复用）。
 func (c *Client) Logout() {
 	c.closeWS()
+	c.stopOutbox()
 	c.mu.Lock()
 	c.http = nil
 	c.session = nil
@@ -248,8 +276,12 @@ func (c *Client) Messages(ctx context.Context, conversationID uint64, beforeSeq 
 	return c.store.Messages(conversationID), nil
 }
 
-// SendMessage 发送文本消息（conversationID 必须已通过 OpenConversation 拿到）。
-func (c *Client) SendMessage(ctx context.Context, conversationID uint64, text string) (*Message, error) {
+// SendMessage 先把消息放进本地发送队列并立刻返回（state=sending）。
+//
+// 真正的网络发送在后台做：网络错误/429/5xx 指数退避重试，复用 client_msg_id；
+// 确认后发 message.sent 事件并写入 messages，4xx 则发 message.failed 且不再重试。
+// 这样断网、进程重启都不会丢“已经点了发送”的消息。
+func (c *Client) SendMessage(_ context.Context, conversationID uint64, text string) (*Message, error) {
 	c.mu.Lock()
 	hc := c.http
 	session := c.session
@@ -258,17 +290,21 @@ func (c *Client) SendMessage(ctx context.Context, conversationID uint64, text st
 		return nil, errors.New("未登录")
 	}
 
-	clientMsgID := uuid.NewString()
-	res, err := hc.sendMessage(ctx, conversationID, 0, clientMsgID, textBody(text))
-	if err != nil {
-		return nil, err
+	now := time.Now().Truncate(time.Millisecond)
+	item := &OutboxMessage{
+		ClientMsgID:    uuid.NewString(),
+		ConversationID: conversationID,
+		SenderID:       session.User.ID,
+		Body:           textBody(text),
+		CreatedAt:      outboxCreatedAt(now),
+		Status:         OutboxSending,
+		NextAttemptAt:  now.UnixMilli(),
 	}
-	if res.Message == nil {
-		return nil, errors.New("服务端未返回消息")
+	if err := c.store.EnqueueOutbox(item); err != nil {
+		return nil, fmt.Errorf("写入发送队列: %w", err)
 	}
-	c.store.AddMessage(res.Message)
-	c.store.MarkUnreadZero(conversationID)
-	return res.Message, nil
+	go c.flushOutbox()
+	return item.Message(), nil
 }
 
 // MarkRead 上报已读位。
@@ -308,6 +344,10 @@ func (c *Client) startWS() {
 }
 
 func (c *Client) emitState(state ConnectionState) {
+	if state.Connected {
+		// WS 重连成功 = 网络恢复的信号：顺手把积压的发送队列推一遍。
+		go c.flushOutbox()
+	}
 	c.mu.Lock()
 	cb := c.onState
 	c.mu.Unlock()

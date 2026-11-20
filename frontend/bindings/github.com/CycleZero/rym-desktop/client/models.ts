@@ -35,6 +35,12 @@ export interface Message {
     "reply_to": string;
     "version": number;
     "created_at": string;
+
+    /**
+     * State / Error 只对本地未确认消息有值（sending / failed）；服务端消息为空。
+     */
+    "state"?: string;
+    "error"?: string;
 }
 
 /**

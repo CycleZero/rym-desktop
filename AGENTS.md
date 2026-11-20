@@ -35,7 +35,8 @@ main.go            Wails 入口
   目录 0700 / 库文件 0600；旧版 `store.json` 首次打开时导入并改名 `.imported`。
 - token 走系统凭据库（`client/secret.go`），不可用时退到 `SecretDir()/token`；
   数据库里**不存** token。
-- 没有 outbox 持久化；发送失败由 UI 保留输入，后续补 outbox。
+- 发送走 outbox：先落库再后台发，网络错误指数退避、4xx 标 failed；
+  这条路径已实现并有单测，别再退回“同步发完才返回”。
 - 托盘/通知已接：关闭窗口收进托盘；窗口不可见/失焦时发通知。
 - 没有群聊/媒体/撤回/离线推送。
 
@@ -90,7 +91,18 @@ main.go            Wails 入口
 - 测试必须注入内存 `tokenStore`（`newClient(path, &memoryTokenStore{})`），
   禁止让 `go test` 碰真实凭据库或写 `$HOME`。
 - `SetMaxOpenConns(1)`：**`rows` 没关之前不要再发查询**，否则自己等自己死锁。
-  （读出来的行先 `Close`/读完，再做下一件事。）
+  （读出来的行先 `Close`/读完，再做下一件事。`Messages` 合并 outbox 就是这样做的。）
+- 发送队列 `outbox`：
+  - 未确认消息**不进 messages**（没有 seq），读的时候由 `Store.Messages` 合并到列表尾部；
+  - 入队顺序用 `created_at, rowid` 排序，**不要用 `client_msg_id` 当 tiebreak**：
+    同一毫秒连发两条时随机 UUID 会让它们换位，进而拿反 seq；
+  - 只有 `sending` 会被调度，`failed` 留给 UI 展示，不自动重试；
+  - 4xx 才标 failed；401 必须保留（token 失效不是消息的错），网络/429/5xx 走退避；
+  - 确认用 `ResolveOutbox`（同事务写 messages + 删队列），服务端回推带
+    `client_msg_id` 的消息时也直接清队列项（HTTP 响应可能丢）；
+  - 401 只清令牌、保留队列（token 过期不该丢用户已发的消息）；
+    换账号时必须清库——`Login` 按缓存的 user_id 判断，否则会用新账号
+    把上一个账号的待发消息发出去。
 
 ## 坑
 

@@ -55,6 +55,7 @@ func (s *Store) Clear() {
 		`DELETE FROM settings`,
 		`DELETE FROM conversations`,
 		`DELETE FROM messages`,
+		`DELETE FROM outbox`,
 	} {
 		if _, err := tx.Exec(stmt); err != nil {
 			return
@@ -175,7 +176,7 @@ func upsertConversation(tx *sql.Tx, conv *Conversation) error {
 	return err
 }
 
-// Messages 返回会话消息副本（按 seq 升序）。
+// Messages 返回会话消息副本（服务端消息按 seq 升序，后面接未确认的本地消息）。
 func (s *Store) Messages(conversationID uint64) []*Message {
 	rows, err := s.db.Query(`SELECT seq, msg_id, sender_id, client_msg_id, type, body,
 		status, reply_to, version, created_at
@@ -183,7 +184,6 @@ func (s *Store) Messages(conversationID uint64) []*Message {
 	if err != nil {
 		return []*Message{}
 	}
-	defer rows.Close()
 
 	out := make([]*Message, 0, 64)
 	for rows.Next() {
@@ -202,8 +202,16 @@ func (s *Store) Messages(conversationID uint64) []*Message {
 		msg.Version = int32(msgVersion)
 		out = append(out, msg)
 	}
-	if err := rows.Err(); err != nil {
+	// 必须先关掉 rows：连接池只有 1 条连接，下面查 outbox 会等这条连接。
+	err = rows.Err()
+	_ = rows.Close()
+	if err != nil {
 		return []*Message{}
+	}
+
+	// 未确认的消息没有 seq，统一排在已确认消息之后（确认后会自动落到正确位置）。
+	for _, item := range s.OutboxOf(conversationID) {
+		out = append(out, item.Message())
 	}
 	return out
 }
@@ -243,6 +251,15 @@ func addMessage(tx *sql.Tx, msg *Message) (bool, error) {
 	}
 	if affected == 0 {
 		return false, nil // 同 msg_id 或同 seq 已存在
+	}
+
+	// 服务端回推自己发的消息时，按 client_msg_id 把队列项清掉：
+	// HTTP 响应可能丢，WS 这条就是确认信号。
+	if msg.ClientMsgID != "" {
+		if _, err := tx.Exec(`DELETE FROM outbox WHERE conversation_id = ? AND client_msg_id = ?`,
+			msg.ConversationID, msg.ClientMsgID); err != nil {
+			return false, err
+		}
 	}
 
 	lastMsgJSON, err := marshalJSON(msg)

@@ -94,10 +94,15 @@ func TestE2E(t *testing.T) {
 		t.Fatalf("peer_id=%d，期望 %d", conv.PeerID, bobUser.ID)
 	}
 
-	sent, err := alice.SendMessage(ctx, conv.ID, "hello from e2e")
+	// 发送是「先落库再后台发」：立刻返回的是 pending，确认后才拿到 seq/msg_id。
+	pending, err := alice.SendMessage(ctx, conv.ID, "hello from e2e")
 	if err != nil {
 		t.Fatalf("发送: %v", err)
 	}
+	if pending.ClientMsgID == "" || pending.State != OutboxSending || pending.Seq != 0 {
+		t.Fatalf("应返回发送中的本地消息: %+v", pending)
+	}
+	sent := waitConfirmed(t, alice, conv.ID, pending.ClientMsgID)
 	if sent.Seq == 0 || sent.MsgID == "" {
 		t.Fatalf("发送返回不完整: %+v", sent)
 	}
@@ -164,6 +169,27 @@ func TestE2E(t *testing.T) {
 	if _, err := aliceTokens.Get(); !errors.Is(err, errNoToken) {
 		t.Fatalf("登出后应清除令牌，实际 %v", err)
 	}
+}
+
+// waitConfirmed 等后台发送队列拿到服务端确认（有 msg_id/seq）。
+func waitConfirmed(t *testing.T, c *Client, conversationID uint64, clientMsgID string) *Message {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, m := range c.store.Messages(conversationID) {
+			if m.ClientMsgID == clientMsgID && m.Seq > 0 && m.MsgID != "" {
+				return m
+			}
+		}
+		for _, item := range c.store.OutboxOf(conversationID) {
+			if item.ClientMsgID == clientMsgID && item.Status == OutboxFailed {
+				t.Fatalf("发送失败: %s", item.LastError)
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("等待消息确认超时，队列：%+v", c.store.OutboxOf(conversationID))
+	return nil
 }
 
 func waitConnected(t *testing.T, states <-chan ConnectionState) {

@@ -12,7 +12,10 @@ import (
 
 // schemaVersion 是本地库的表结构版本，用 SQLite 的 PRAGMA user_version 记录。
 // 升级表结构时：加一个 if 分支写增量 SQL，并把这个常量 +1；不要改已发布的建表语句。
-const schemaVersion = 1
+//
+//	v1 基线：settings / conversations / messages
+//	v2 发送队列：outbox
+const schemaVersion = 2
 
 // Store 是本地会话/消息缓存（SQLite）。
 //
@@ -98,53 +101,79 @@ func (s *Store) migrate() error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS settings (
-			key   TEXT PRIMARY KEY,
-			value TEXT NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS conversations (
-			id              INTEGER PRIMARY KEY,
-			type            INTEGER NOT NULL DEFAULT 0,
-			last_seq        INTEGER NOT NULL DEFAULT 0,
-			read_seq        INTEGER NOT NULL DEFAULT 0,
-			unread_count    INTEGER NOT NULL DEFAULT 0,
-			version         INTEGER NOT NULL DEFAULT 0,
-			peer_read_seq   INTEGER NOT NULL DEFAULT 0,
-			peer_id         INTEGER NOT NULL DEFAULT 0,
-			peer_json       TEXT    NOT NULL DEFAULT '',
-			last_msg_seq    INTEGER NOT NULL DEFAULT 0,
-			last_msg_json   TEXT    NOT NULL DEFAULT '',
-			pinned          INTEGER NOT NULL DEFAULT 0,
-			muted           INTEGER NOT NULL DEFAULT 0,
-			joined_at       TEXT    NOT NULL DEFAULT ''
-		)`,
-		// 主键 (conversation_id, seq) 是顺序与唯一性的闸门；
-		// (conversation_id, msg_id) 让重发的消息幂等。
-		`CREATE TABLE IF NOT EXISTS messages (
-			conversation_id INTEGER NOT NULL,
-			seq             INTEGER NOT NULL,
-			msg_id          TEXT    NOT NULL,
-			sender_id       INTEGER NOT NULL,
-			client_msg_id   TEXT    NOT NULL DEFAULT '',
-			type            INTEGER NOT NULL DEFAULT 0,
-			body            TEXT    NOT NULL DEFAULT '',
-			status          INTEGER NOT NULL DEFAULT 0,
-			reply_to        TEXT    NOT NULL DEFAULT '',
-			version         INTEGER NOT NULL DEFAULT 0,
-			created_at      TEXT    NOT NULL DEFAULT '',
-			PRIMARY KEY (conversation_id, seq)
-		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uk_messages_msg_id
-			ON messages (conversation_id, msg_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_messages_client_msg_id
-			ON messages (conversation_id, sender_id, client_msg_id)`,
-	}
-	for _, stmt := range stmts {
-		if _, err := tx.Exec(stmt); err != nil {
-			return err
+	// v1 基线表。
+	if version < 1 {
+		for _, stmt := range []string{
+			`CREATE TABLE IF NOT EXISTS settings (
+				key   TEXT PRIMARY KEY,
+				value TEXT NOT NULL
+			)`,
+			`CREATE TABLE IF NOT EXISTS conversations (
+				id              INTEGER PRIMARY KEY,
+				type            INTEGER NOT NULL DEFAULT 0,
+				last_seq        INTEGER NOT NULL DEFAULT 0,
+				read_seq        INTEGER NOT NULL DEFAULT 0,
+				unread_count    INTEGER NOT NULL DEFAULT 0,
+				version         INTEGER NOT NULL DEFAULT 0,
+				peer_read_seq   INTEGER NOT NULL DEFAULT 0,
+				peer_id         INTEGER NOT NULL DEFAULT 0,
+				peer_json       TEXT    NOT NULL DEFAULT '',
+				last_msg_seq    INTEGER NOT NULL DEFAULT 0,
+				last_msg_json   TEXT    NOT NULL DEFAULT '',
+				pinned          INTEGER NOT NULL DEFAULT 0,
+				muted           INTEGER NOT NULL DEFAULT 0,
+				joined_at       TEXT    NOT NULL DEFAULT ''
+			)`,
+			// 主键 (conversation_id, seq) 是顺序与唯一性的闸门；
+			// (conversation_id, msg_id) 让重发的消息幂等。
+			`CREATE TABLE IF NOT EXISTS messages (
+				conversation_id INTEGER NOT NULL,
+				seq             INTEGER NOT NULL,
+				msg_id          TEXT    NOT NULL,
+				sender_id       INTEGER NOT NULL,
+				client_msg_id   TEXT    NOT NULL DEFAULT '',
+				type            INTEGER NOT NULL DEFAULT 0,
+				body            TEXT    NOT NULL DEFAULT '',
+				status          INTEGER NOT NULL DEFAULT 0,
+				reply_to        TEXT    NOT NULL DEFAULT '',
+				version         INTEGER NOT NULL DEFAULT 0,
+				created_at      TEXT    NOT NULL DEFAULT '',
+				PRIMARY KEY (conversation_id, seq)
+			)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS uk_messages_msg_id
+				ON messages (conversation_id, msg_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_messages_client_msg_id
+				ON messages (conversation_id, sender_id, client_msg_id)`,
+		} {
+			if _, err := tx.Exec(stmt); err != nil {
+				return err
+			}
 		}
 	}
+
+	// v2 发送队列：没被服务端确认的消息不进 messages（没有 seq），单独排队。
+	if version < 2 {
+		for _, stmt := range []string{
+			`CREATE TABLE IF NOT EXISTS outbox (
+				client_msg_id   TEXT PRIMARY KEY,
+				conversation_id INTEGER NOT NULL,
+				sender_id       INTEGER NOT NULL DEFAULT 0,
+				body            TEXT    NOT NULL,
+				created_at      TEXT    NOT NULL,
+				status          TEXT    NOT NULL DEFAULT 'sending',
+				attempts        INTEGER NOT NULL DEFAULT 0,
+				next_attempt_at INTEGER NOT NULL DEFAULT 0,
+				last_error      TEXT    NOT NULL DEFAULT ''
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_outbox_due
+				ON outbox (status, next_attempt_at, created_at)`,
+		} {
+			if _, err := tx.Exec(stmt); err != nil {
+				return err
+			}
+		}
+	}
+
 	// PRAGMA 不支持参数绑定，版本号是编译期常量，直接拼。
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
 		return err
